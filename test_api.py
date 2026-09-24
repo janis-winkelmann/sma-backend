@@ -27,12 +27,14 @@ class ApiTest(unittest.TestCase):
                 "is_deleted": True,
                 "posted_at": "2026-03-02T12:00:00Z",
                 "chunks": [{"url": "https://cdn.discordapp.com/attachments/1/2/123.part000"}],
+                "thumbnail": "https://cdn.discordapp.com/attachments/1/2/thumb.jpg",
             }
         )
         self.assertEqual(payload["title"], "Hello")
         self.assertEqual(payload["status"], "Deleted")
         self.assertIn("Removed from the profile", payload["detail"])
         self.assertEqual(payload["mediaUrl"], "/api/media/123")
+        self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
 
     def test_new_username_is_flagged_and_hides_posts(self):
         payload = lookup_payload({"username": "newname"}, [{"post_id": "1", "caption": "x"}], True, "newname")
@@ -48,6 +50,7 @@ class ApiTest(unittest.TestCase):
         )
         self.assertFalse(payload["added"])
         self.assertEqual(payload["posts"][0]["title"], "Clip")
+        self.assertIsNone(payload["posts"][0]["thumbnailUrl"])
 
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")

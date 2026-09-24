@@ -47,7 +47,7 @@ class Database(object):
         response = self.session.get(
             self.base + "/tiktok_posts",
             params={
-                "select": "post_id,type,caption,chunks,is_deleted,posted_at",
+                "select": "post_id,type,caption,chunks,thumbnail,is_deleted,posted_at",
                 "sec_uid": "eq.%s" % sec_uid,
                 "order": "posted_at.desc.nullslast",
             },
@@ -59,7 +59,7 @@ class Database(object):
     def post(self, post_id):
         response = self.session.get(
             self.base + "/tiktok_posts",
-            params={"select": "post_id,type,chunks", "post_id": "eq.%s" % post_id, "limit": "1"},
+            params={"select": "post_id,type,chunks,thumbnail", "post_id": "eq.%s" % post_id, "limit": "1"},
             timeout=30,
         )
         response.raise_for_status()

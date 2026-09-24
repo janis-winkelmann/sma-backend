@@ -69,6 +69,7 @@ def present_post(row):
         "status": "Deleted" if deleted else "Archived",
         "type": row.get("type") or "video",
         "mediaUrl": "/api/media/%s" % row.get("post_id") if chunks else None,
+        "thumbnailUrl": "/api/thumb/%s" % row.get("post_id") if row.get("thumbnail") else None,
     }
 
 
@@ -114,6 +115,26 @@ def media(post_id):
     return Response(
         files.stream(chunks),
         mimetype=content_type(row.get("type"), chunks),
+    )
+
+
+@app.get("/api/thumb/<post_id>")
+def thumb(post_id):
+    store = database()
+    files = discord_files()
+    if store is None or files is None:
+        return jsonify({"error": "Storage is not configured."}), 503
+    row = store.post(post_id)
+    stored = (row or {}).get("thumbnail")
+    if not stored:
+        return jsonify({"error": "No thumbnail stored for this post."}), 404
+    fresh = files.refresh([stored])
+    url = fresh.get(stored) or stored
+    upstream = requests.get(url, stream=True, timeout=30)
+    upstream.raise_for_status()
+    return Response(
+        upstream.iter_content(256 * 1024),
+        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
     )
 
 

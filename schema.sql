@@ -18,9 +18,12 @@ create table if not exists public.tiktok_posts (
   type text not null check (type in ('video', 'live', 'story', 'images')),
   caption text,
   chunks jsonb not null default '[]'::jsonb,
+  thumbnail text,
   posted_at timestamptz,
   created_at timestamptz not null default now()
 );
+
+alter table public.tiktok_posts add column if not exists thumbnail text;
 
 create index if not exists tiktok_users_last_scraped_idx
   on public.tiktok_users (last_scraped);

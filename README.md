@@ -17,6 +17,7 @@ gunicorn --bind 127.0.0.1:8000 app:app
 - `GET /api/platforms` — one option, TikTok
 - `GET /api/lookup?user=name&platform=tiktok` — queues the username and returns stored posts
 - `GET /api/media/<post_id>` — refreshes the Discord chunk links and streams the file
+- `GET /api/thumb/<post_id>` — refreshes the stored cover image
 - `GET /api/pfp/<username>` — refreshes the stored profile image
 
 Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `DISCORD_BOT_TOKEN`. Create the tables with `schema.sql` first. A lookup inserts the username; sma-scraper fills in the profile and posts.
