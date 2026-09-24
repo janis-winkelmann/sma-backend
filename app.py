@@ -41,6 +41,20 @@ def format_when(value):
     return "%s %s" % (parsed.strftime("%b"), parsed.day)
 
 
+def lookup_payload(user, posts, added, username):
+    shown = [] if added else [present_post(row) for row in posts]
+    return {
+        "platform": "tiktok",
+        "username": user.get("username") or username,
+        "name": user.get("name") or "",
+        "bio": user.get("bio") or "",
+        "visibility": user.get("visibility") or "",
+        "pfpUrl": "/api/pfp/%s" % username if user.get("pfp") else None,
+        "added": added,
+        "posts": shown,
+    }
+
+
 def present_post(row):
     deleted = bool(row.get("is_deleted"))
     when = format_when(row.get("posted_at"))
@@ -80,22 +94,11 @@ def lookup():
     if store is None:
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
-        user = store.ensure_user(username)
-        posts = store.posts_for(user.get("sec_uid"))
+        user, added = store.ensure_user(username)
+        posts = [] if added else store.posts_for(user.get("sec_uid"))
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(
-        {
-            "platform": "tiktok",
-            "username": user.get("username") or username,
-            "name": user.get("name") or "",
-            "bio": user.get("bio") or "",
-            "visibility": user.get("visibility") or "",
-            "pfpUrl": "/api/pfp/%s" % username if user.get("pfp") else None,
-            "pending": user.get("last_scraped") is None and not posts,
-            "posts": [present_post(row) for row in posts],
-        }
-    )
+    return jsonify(lookup_payload(user, posts, added, username))
 
 
 @app.get("/api/media/<post_id>")

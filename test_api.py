@@ -1,6 +1,6 @@
 import unittest
 
-from app import app, present_post
+from app import app, lookup_payload, present_post
 from media import content_type
 
 
@@ -33,6 +33,21 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["status"], "Deleted")
         self.assertIn("Removed from the profile", payload["detail"])
         self.assertEqual(payload["mediaUrl"], "/api/media/123")
+
+    def test_new_username_is_flagged_and_hides_posts(self):
+        payload = lookup_payload({"username": "newname"}, [{"post_id": "1", "caption": "x"}], True, "newname")
+        self.assertTrue(payload["added"])
+        self.assertEqual(payload["posts"], [])
+
+    def test_existing_username_includes_posts(self):
+        payload = lookup_payload(
+            {"username": "known", "sec_uid": "sec"},
+            [{"post_id": "1", "type": "video", "caption": "Clip", "is_deleted": False, "chunks": []}],
+            False,
+            "known",
+        )
+        self.assertFalse(payload["added"])
+        self.assertEqual(payload["posts"][0]["title"], "Clip")
 
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")

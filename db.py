@@ -28,7 +28,7 @@ class Database(object):
     def ensure_user(self, username):
         found = self.get_user(username)
         if found:
-            return found
+            return found, False
         response = self.session.post(
             self.base + "/tiktok_users",
             headers={"Prefer": "return=representation"},
@@ -36,10 +36,10 @@ class Database(object):
             timeout=30,
         )
         if response.status_code == 409:
-            return self.get_user(username)
+            return self.get_user(username), False
         response.raise_for_status()
         rows = response.json()
-        return rows[0]
+        return rows[0], True
 
     def posts_for(self, sec_uid):
         if not sec_uid:
