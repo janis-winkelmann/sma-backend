@@ -19,11 +19,13 @@ create table if not exists public.tiktok_posts (
   caption text,
   chunks jsonb not null default '[]'::jsonb,
   thumbnail text,
+  slides jsonb not null default '[]'::jsonb,
   posted_at timestamptz,
   created_at timestamptz not null default now()
 );
 
 alter table public.tiktok_posts add column if not exists thumbnail text;
+alter table public.tiktok_posts add column if not exists slides jsonb not null default '[]'::jsonb;
 
 create index if not exists tiktok_users_last_scraped_idx
   on public.tiktok_users (last_scraped);

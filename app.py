@@ -41,8 +41,56 @@ def format_when(value):
     return "%s %s" % (parsed.strftime("%b"), parsed.day)
 
 
-def lookup_payload(user, posts, added, username):
+PAGE_LIMIT = 12
+
+
+def empty_counts():
+    return {
+        "all": 0,
+        "video": 0,
+        "images": 0,
+        "live": 0,
+        "story": 0,
+        "archived": 0,
+        "deleted": 0,
+    }
+
+
+def clamp_limit(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return PAGE_LIMIT
+    return max(1, min(number, 24))
+
+
+def clamp_offset(value):
+    try:
+        number = int(value)
+    except (TypeError, ValueError):
+        return 0
+    return max(0, min(number, 100000))
+
+
+def clean_search(value):
+    kept = []
+    for character in (value or "").strip().lower():
+        if character.isalnum() or character in " ._'#-":
+            kept.append(character)
+    return "".join(kept)[:80].strip()
+
+
+def lookup_payload(user, posts, added, username, total=None, counts=None):
     shown = [] if added else [present_post(row) for row in posts]
+    if added:
+        total = 0
+        counts = empty_counts()
+    else:
+        if total is None:
+            total = len(shown)
+        if counts is None:
+            counts = empty_counts()
+            counts["all"] = len(shown)
     return {
         "platform": "tiktok",
         "username": user.get("username") or username,
@@ -52,6 +100,8 @@ def lookup_payload(user, posts, added, username):
         "pfpUrl": "/api/pfp/%s" % username if user.get("pfp") else None,
         "added": added,
         "posts": shown,
+        "total": total,
+        "counts": counts,
     }
 
 
@@ -62,14 +112,28 @@ def present_post(row):
     if when:
         detail = "%s · %s" % (detail, when)
     chunks = row.get("chunks") or []
+    slides = sorted(row.get("slides") or [], key=lambda item: item.get("index") or 0)
+    post_id = row.get("post_id")
+    kind = row.get("type") or "video"
+    if slides:
+        image_urls = [
+            "/api/slide/%s/%s" % (post_id, item.get("index") if item.get("index") is not None else index)
+            for index, item in enumerate(slides)
+        ]
+    elif kind == "images" and chunks:
+        image_urls = ["/api/media/%s" % post_id]
+    else:
+        image_urls = []
     return {
-        "id": row.get("post_id"),
-        "title": row.get("caption") or row.get("type") or "Post",
+        "id": post_id,
+        "title": row.get("caption") or kind or "Post",
         "detail": detail,
         "status": "Deleted" if deleted else "Archived",
-        "type": row.get("type") or "video",
-        "mediaUrl": "/api/media/%s" % row.get("post_id") if chunks else None,
-        "thumbnailUrl": "/api/thumb/%s" % row.get("post_id") if row.get("thumbnail") else None,
+        "type": kind,
+        "mediaUrl": "/api/media/%s" % post_id if chunks and kind != "images" else None,
+        "thumbnailUrl": "/api/thumb/%s" % post_id if row.get("thumbnail") else None,
+        "imageUrls": image_urls,
+        "imageCount": len(image_urls),
     }
 
 
@@ -96,10 +160,97 @@ def lookup():
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
         user, added = store.ensure_user(username)
-        posts = [] if added else store.posts_for(user.get("sec_uid"))
+        if added:
+            page = {"posts": [], "total": 0}
+            counts = empty_counts()
+        else:
+            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "")
+            counts = store.post_counts(user.get("sec_uid"))
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(lookup_payload(user, posts, added, username))
+    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts))
+
+
+@app.get("/api/posts")
+def posts():
+    username = clean_username(request.args.get("user", ""))
+    if not username:
+        return jsonify({"error": "Enter a username."}), 400
+    store = database()
+    if store is None:
+        return jsonify({"error": "Supabase is not configured."}), 503
+    kind = request.args.get("type") or "all"
+    status = request.args.get("status") or "all"
+    order = request.args.get("order") if request.args.get("order") in ("latest", "first") else "latest"
+    offset = clamp_offset(request.args.get("offset"))
+    limit = clamp_limit(request.args.get("limit"))
+    try:
+        user = store.get_user(username)
+        if not user:
+            return jsonify({"posts": [], "total": 0, "offset": offset, "limit": limit})
+        page = store.posts_page(
+            user.get("sec_uid"),
+            offset,
+            limit,
+            order,
+            kind,
+            status,
+            clean_search(request.args.get("q")),
+        )
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    return jsonify(
+        {
+            "posts": [present_post(row) for row in page["posts"]],
+            "total": page["total"],
+            "offset": offset,
+            "limit": limit,
+        }
+    )
+
+
+@app.get("/api/users")
+def users():
+    store = database()
+    if store is None:
+        return jsonify({"error": "Supabase is not configured."}), 503
+    try:
+        rows = store.list_users()
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    return jsonify(
+        {
+            "users": [
+                {
+                    "username": row.get("username") or "",
+                    "name": row.get("name") or "",
+                    "bio": row.get("bio") or "",
+                    "visibility": row.get("visibility") or "",
+                    "pfpUrl": "/api/pfp/%s" % row.get("username") if row.get("pfp") else None,
+                }
+                for row in rows
+            ]
+        }
+    )
+
+
+@app.get("/api/post/<username>/<post_id>")
+def one_post(username, post_id):
+    store = database()
+    if store is None:
+        return jsonify({"error": "Supabase is not configured."}), 503
+    try:
+        user = store.get_user(clean_username(username))
+        row = store.post(post_id)
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    if not user or not row or row.get("sec_uid") != user.get("sec_uid"):
+        return jsonify({"error": "Post not found."}), 404
+    payload = present_post(row)
+    payload["username"] = user.get("username") or clean_username(username)
+    payload["name"] = user.get("name") or ""
+    payload["pfpUrl"] = "/api/pfp/%s" % payload["username"] if user.get("pfp") else None
+    return jsonify(payload)
 
 
 @app.get("/api/media/<post_id>")
@@ -115,6 +266,36 @@ def media(post_id):
     return Response(
         files.stream(chunks),
         mimetype=content_type(row.get("type"), chunks),
+    )
+
+
+@app.get("/api/slide/<post_id>/<int:index>")
+def slide(post_id, index):
+    store = database()
+    files = discord_files()
+    if store is None or files is None:
+        return jsonify({"error": "Storage is not configured."}), 503
+    row = store.post(post_id)
+    slides = (row or {}).get("slides") or []
+    match = None
+    for item in slides:
+        if item.get("index") == index:
+            match = item
+            break
+    if match is None:
+        ordered = sorted(slides, key=lambda item: item.get("index") or 0)
+        if 0 <= index < len(ordered):
+            match = ordered[index]
+    stored = (match or {}).get("url")
+    if not stored:
+        return jsonify({"error": "No slide stored for this post."}), 404
+    fresh = files.refresh([stored])
+    url = fresh.get(stored) or stored
+    upstream = requests.get(url, stream=True, timeout=30)
+    upstream.raise_for_status()
+    return Response(
+        upstream.iter_content(256 * 1024),
+        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
     )
 
 

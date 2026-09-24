@@ -35,11 +35,32 @@ class ApiTest(unittest.TestCase):
         self.assertIn("Removed from the profile", payload["detail"])
         self.assertEqual(payload["mediaUrl"], "/api/media/123")
         self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
+        self.assertEqual(payload["imageUrls"], [])
+
+    def test_photo_post_lists_each_slide(self):
+        payload = present_post(
+            {
+                "post_id": "9",
+                "type": "images",
+                "caption": "Trip",
+                "is_deleted": False,
+                "chunks": [],
+                "slides": [
+                    {"url": "https://cdn.discordapp.com/attachments/1/2/a.jpg", "index": 0},
+                    {"url": "https://cdn.discordapp.com/attachments/1/2/b.jpg", "index": 1},
+                ],
+            }
+        )
+        self.assertEqual(payload["type"], "images")
+        self.assertEqual(payload["imageUrls"], ["/api/slide/9/0", "/api/slide/9/1"])
+        self.assertEqual(payload["imageCount"], 2)
+        self.assertIsNone(payload["mediaUrl"])
 
     def test_new_username_is_flagged_and_hides_posts(self):
         payload = lookup_payload({"username": "newname"}, [{"post_id": "1", "caption": "x"}], True, "newname")
         self.assertTrue(payload["added"])
         self.assertEqual(payload["posts"], [])
+        self.assertEqual(payload["total"], 0)
 
     def test_existing_username_includes_posts(self):
         payload = lookup_payload(
