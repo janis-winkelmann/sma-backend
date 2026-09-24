@@ -1,6 +1,7 @@
 import os
 from datetime import datetime
 
+import requests
 from flask import Flask, Response, jsonify, request
 
 from db import Database
@@ -78,8 +79,11 @@ def lookup():
     store = database()
     if store is None:
         return jsonify({"error": "Supabase is not configured."}), 503
-    user = store.ensure_user(username)
-    posts = store.posts_for(user.get("sec_uid"))
+    try:
+        user = store.ensure_user(username)
+        posts = store.posts_for(user.get("sec_uid"))
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     return jsonify(
         {
             "platform": "tiktok",
