@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
@@ -211,6 +212,31 @@ def present_post(row, locked=False):
     }
 
 
+
+def load_archive(store, user, premium, limit):
+    sec_uid = user.get("sec_uid")
+    cutoff = None if premium else free_cutoff()
+    with ThreadPoolExecutor(max_workers=3) as pool:
+        page_future = pool.submit(store.posts_page, sec_uid, 0, limit, "latest", "all", "all", "")
+        counts_future = pool.submit(store.post_counts, sec_uid)
+        locked_future = pool.submit(store.locked_video_count, sec_uid, cutoff)
+        page = page_future.result()
+        counts = counts_future.result()
+        locked = 0 if premium else locked_future.result()
+    return page, counts, locked
+
+
+IMAGE_CACHE = "public, max-age=86400"
+
+
+def cached_image(upstream):
+    return Response(
+        upstream.iter_content(256 * 1024),
+        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
+        headers={"Cache-Control": IMAGE_CACHE},
+    )
+
+
 @app.get("/health")
 def health():
     return jsonify({"status": "ok", "service": "sma-backend"})
@@ -235,15 +261,12 @@ def lookup():
     try:
         user, added = store.ensure_user(username)
         premium = viewer_is_premium()
-        cutoff = None if premium else free_cutoff()
         if added:
             page = {"posts": [], "total": 0}
             counts = empty_counts()
             locked = 0
         else:
-            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "")
-            counts = store.post_counts(user.get("sec_uid"))
-            locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
+            page, counts, locked = load_archive(store, user, premium, PAGE_LIMIT)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts, locked, premium))
@@ -304,10 +327,7 @@ def profile(username):
         if not user:
             return jsonify({"error": "Account not found."}), 404
         premium = viewer_is_premium()
-        cutoff = None if premium else free_cutoff()
-        page = store.posts_page(user.get("sec_uid"), 0, 24, "latest", "all", "all", "")
-        counts = store.post_counts(user.get("sec_uid"))
-        locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
+        page, counts, locked = load_archive(store, user, premium, 24)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     return jsonify(lookup_payload(user, page["posts"], False, username, page["total"], counts, locked, premium))
@@ -472,10 +492,7 @@ def slide(post_id, index):
     url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"slides": replace_urls(slides, {stored: fresh})}))
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
-    return Response(
-        upstream.iter_content(256 * 1024),
-        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
-    )
+    return cached_image(upstream)
 
 
 @app.get("/api/thumb/<post_id>")
@@ -491,10 +508,7 @@ def thumb(post_id):
     url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
-    return Response(
-        upstream.iter_content(256 * 1024),
-        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
-    )
+    return cached_image(upstream)
 
 
 @app.get("/api/pfp/<username>")
@@ -513,4 +527,4 @@ def pfp(username):
     )
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
-    return Response(upstream.iter_content(256 * 1024), mimetype=upstream.headers.get("Content-Type", "image/jpeg"))
+    return cached_image(upstream)

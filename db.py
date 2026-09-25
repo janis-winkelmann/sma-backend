@@ -1,4 +1,5 @@
 import os
+from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
@@ -100,11 +101,19 @@ class Database(object):
         if not sec_uid:
             return counts
         window = {"or": visible_or} if visible_or else {}
-        counts["all"] = self._count(sec_uid, window or None)
-        for kind in ("video", "images", "live", "story"):
-            counts[kind] = self._count(sec_uid, dict(window, type="eq.%s" % kind))
-        counts["archived"] = self._count(sec_uid, dict(window, is_deleted="eq.false"))
-        counts["deleted"] = self._count(sec_uid, dict(window, is_deleted="eq.true"))
+        jobs = [
+            ("all", window or None),
+            ("video", dict(window, type="eq.video")),
+            ("images", dict(window, type="eq.images")),
+            ("live", dict(window, type="eq.live")),
+            ("story", dict(window, type="eq.story")),
+            ("archived", dict(window, is_deleted="eq.false")),
+            ("deleted", dict(window, is_deleted="eq.true")),
+        ]
+        with ThreadPoolExecutor(max_workers=len(jobs)) as pool:
+            futures = [pool.submit(self._count, sec_uid, extra) for _, extra in jobs]
+            for (key, _), future in zip(jobs, futures):
+                counts[key] = future.result()
         return counts
 
     def locked_video_count(self, sec_uid, cutoff):
@@ -121,14 +130,23 @@ class Database(object):
         params = {"select": "post_id", "sec_uid": "eq.%s" % sec_uid, "limit": "1"}
         if extra:
             params.update(extra)
-        response = self.session.get(
+        # A fresh request per call so the seven counts can run at once.
+        response = requests.get(
             self.base + "/tiktok_posts",
-            headers={"Prefer": "count=exact"},
+            headers={
+                "apikey": self.session.headers["apikey"],
+                "Authorization": self.session.headers["Authorization"],
+                "Prefer": "count=exact",
+            },
             params=params,
             timeout=30,
+            stream=True,
         )
-        response.raise_for_status()
-        return content_range_total(response.headers.get("Content-Range"), len(response.json()))
+        try:
+            response.raise_for_status()
+            return content_range_total(response.headers.get("Content-Range"), 0)
+        finally:
+            response.close()
 
     def post(self, post_id):
         response = self.session.get(

@@ -3,7 +3,10 @@ import unittest
 from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
-from app import app, free_visible_filter, lookup_payload, post_is_locked, present_post
+import time
+
+from app import IMAGE_CACHE, app, free_visible_filter, lookup_payload, post_is_locked, present_post
+from db import Database
 from media import (
     audio_header_patch,
     content_type,
@@ -18,6 +21,27 @@ from media import (
 class ApiTest(unittest.TestCase):
     def setUp(self):
         self.client = app.test_client()
+
+
+    def test_archive_counts_run_together(self):
+        class Counting(Database):
+            def __init__(self):
+                self.calls = 0
+
+            def _count(self, sec_uid, extra):
+                self.calls += 1
+                time.sleep(0.15)
+                return 4
+
+        store = Counting()
+        started = time.perf_counter()
+        counts = store.post_counts("sec")
+        elapsed = time.perf_counter() - started
+        self.assertEqual(store.calls, 7)
+        self.assertEqual(counts["all"], 4)
+        self.assertEqual(counts["deleted"], 4)
+        self.assertLess(elapsed, 0.6)
+        self.assertEqual(IMAGE_CACHE, "public, max-age=86400")
 
     def test_platforms_are_tiktok_only(self):
         response = self.client.get("/api/platforms")
