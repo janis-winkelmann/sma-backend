@@ -361,6 +361,10 @@ class ApiTest(unittest.TestCase):
         self.assertIn("+faststart", args)
         self.assertEqual(assemble_source([b"HELLO-WORLD", b"TAIL"], b"HEY", 5), b"HEY-WORLDTAIL")
         self.assertEqual(assemble_source([b"abc", b"de"], None, 0), b"abcde")
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures", "live_moov.bin")
+        derived = playback._patch_from_chunk(fixture)
+        self.assertIsNotNone(derived)
+        self.assertGreater(len(derived[0]), derived[1])
 
     def test_a_live_snapshot_keeps_serving_the_file_it_started_with(self):
         root = tempfile.mkdtemp()

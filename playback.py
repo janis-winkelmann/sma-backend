@@ -275,6 +275,7 @@ def _schedule(directory, signature, ordered, files, patch, remember):
                 return
         job = {
             "urls": urls,
+            "sizes": [int(chunk.get("size") or 0) for chunk in ordered],
             "source": os.path.join(directory, signature + ".src"),
             "target": exact,
             "prefix_hex": prefix.hex() if prefix is not None else "",
@@ -344,30 +345,61 @@ def ensure_playable(post_id, chunks, files, patch, remember=None, wait_seconds=N
     return found
 
 
-def _download_parts(urls, directory):
+def _download_parts(urls, directory, sizes=None):
     def one(index):
+        expected = int(sizes[index]) if sizes and index < len(sizes) else 0
         dest = os.path.join(directory, "chunk-%03d.bin" % index)
         partial = dest + ".partial"
-        response = None
         try:
-            response = requests.get(urls[index], stream=True, timeout=(15, 180))
-            response.raise_for_status()
-            with open(partial, "wb") as handle:
-                for piece in response.iter_content(256 * 1024):
-                    if piece:
-                        handle.write(piece)
-        except requests.RequestException as exc:
-            status = getattr(getattr(exc, "response", None), "status_code", None)
-            raise RuntimeError("chunk %s download failed (%s)" % (index, status or "error"))
-        finally:
-            if response is not None:
-                response.close()
-        os.replace(partial, dest)
-        return dest
+            if expected and os.path.isfile(dest) and os.path.getsize(dest) == expected:
+                return dest
+        except OSError:
+            pass
+        last_error = "error"
+        for attempt in range(4):
+            response = None
+            try:
+                try:
+                    os.remove(partial)
+                except OSError:
+                    pass
+                response = requests.get(urls[index], stream=True, timeout=(10, 25))
+                response.raise_for_status()
+                with open(partial, "wb") as handle:
+                    for piece in response.iter_content(256 * 1024):
+                        if piece:
+                            handle.write(piece)
+                if expected and os.path.getsize(partial) != expected:
+                    raise OSError("short")
+                os.replace(partial, dest)
+                return dest
+            except (requests.RequestException, OSError) as exc:
+                status = getattr(getattr(exc, "response", None), "status_code", None)
+                last_error = status or type(exc).__name__
+                print("chunk %s retry %s (%s)" % (index, attempt + 1, last_error), flush=True)
+                time.sleep(1 + attempt)
+            finally:
+                if response is not None:
+                    response.close()
+        raise RuntimeError("chunk %s download failed (%s)" % (index, last_error))
 
-    workers = min(4, len(urls)) or 1
+    # One download at a time. Parallel reads from the file host stall and never finish.
+    workers = 1
     with ThreadPoolExecutor(max_workers=workers) as pool:
         return list(pool.map(one, range(len(urls))))
+
+
+def _patch_from_chunk(path):
+    """Read the moov at the start of a stored chunk when the header request did not finish."""
+    from media import audio_header_patch, moov_end
+
+    with open(path, "rb") as handle:
+        sample = handle.read(256 * 1024)
+        end = moov_end(sample)
+        if end and end > len(sample):
+            handle.seek(0)
+            sample = handle.read(min(end, 8 * 1024 * 1024))
+    return audio_header_patch(sample)
 
 
 def _write_source(parts, source, prefix, replaced):
@@ -386,17 +418,32 @@ def _write_source(parts, source, prefix, replaced):
                     output.write(blob)
 
 
-def _cleanup_parts(directory):
+def _cleanup_named(directory, predicate):
     try:
         names = os.listdir(directory)
     except OSError:
         return
     for name in names:
-        if name.startswith("chunk-") and (name.endswith(".bin") or name.endswith(".partial") or name.endswith(".bin.partial")):
+        if predicate(name):
             try:
                 os.remove(os.path.join(directory, name))
             except OSError:
                 pass
+
+
+def _cleanup_partials(directory):
+    _cleanup_named(
+        directory,
+        lambda name: name.startswith("chunk-") and (name.endswith(".partial") or name.endswith(".bin.partial")),
+    )
+
+
+def _cleanup_parts(directory):
+    _cleanup_named(
+        directory,
+        lambda name: name.startswith("chunk-") and name.endswith(".bin") and not name.endswith(".partial"),
+    )
+    _cleanup_partials(directory)
 
 
 def _fresh_pins(directory, max_age):
@@ -471,8 +518,13 @@ def run_job(path):
         handle.write(str(os.getpid()))
     print("remux start chunks=%s" % len(job.get("urls") or []), flush=True)
     try:
-        _cleanup_parts(directory)
-        parts = _download_parts(job["urls"], directory)
+        _cleanup_partials(directory)
+        parts = _download_parts(job["urls"], directory, job.get("sizes"))
+        if prefix is None:
+            derived = _patch_from_chunk(parts[0])
+            if derived:
+                prefix, replaced = derived
+                print("derived audio patch", flush=True)
         _write_source(parts, source, prefix, replaced)
         _cleanup_parts(directory)
         with open(source, "rb") as handle:
@@ -517,7 +569,7 @@ def run_job(path):
                     os.remove(leftover)
             except OSError:
                 pass
-        _cleanup_parts(directory)
+        _cleanup_partials(directory)
         try:
             current = int(open(pidfile).read().strip())
         except (OSError, ValueError):

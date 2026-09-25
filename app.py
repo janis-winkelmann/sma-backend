@@ -387,7 +387,7 @@ def fetch_moov(url):
     need = 64 * 1024
     blob = b""
     for _ in range(3):
-        response = requests.get(url, headers={"Range": "bytes=0-%s" % (need - 1)}, timeout=30)
+        response = requests.get(url, headers={"Range": "bytes=0-%s" % (need - 1)}, timeout=(10, 12))
         response.raise_for_status()
         blob = response.content or b""
         end = moov_end(blob)
@@ -417,8 +417,8 @@ def audio_patch_for(files, post_id, chunks):
     try:
         mapping, _updates = files.prepare([first.get("url")])
         header = fetch_moov(mapping.get(first.get("url")) or first.get("url"))
-    except requests.RequestException:
-        app.logger.exception("live audio header for %s", post_id)
+    except requests.RequestException as exc:
+        app.logger.warning("live audio header for %s failed (%s)", post_id, type(exc).__name__)
         return None, b""
     if not header:
         return None, b""
@@ -468,7 +468,7 @@ def media(post_id):
     patch = None
     if (row or {}).get("type") == "live":
         patch, brand = audio_patch_for(files, post_id, chunks)
-        if live_should_remux(patch, brand):
+        if live_should_remux(patch, brand) or not brand:
             playable = ensure_playable(
                 post_id,
                 chunks,
