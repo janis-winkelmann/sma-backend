@@ -38,6 +38,24 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
         self.assertEqual(payload["imageUrls"], [])
         self.assertEqual(payload["postedAt"], "2026-03-02T12:00:00Z")
+        self.assertFalse(payload["locked"])
+
+    def test_locked_post_keeps_its_thumbnail(self):
+        payload = present_post(
+            {
+                "post_id": "123",
+                "type": "video",
+                "caption": "Old",
+                "is_deleted": False,
+                "posted_at": "2026-01-01T00:00:00Z",
+                "chunks": [{"url": "https://cdn.discordapp.com/attachments/1/2/123.part000"}],
+                "thumbnail": "https://cdn.discordapp.com/attachments/1/2/thumb.jpg",
+            },
+            True,
+        )
+        self.assertTrue(payload["locked"])
+        self.assertIsNone(payload["mediaUrl"])
+        self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
 
     def test_photo_post_lists_each_slide(self):
         payload = present_post(

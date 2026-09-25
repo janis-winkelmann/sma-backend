@@ -128,8 +128,8 @@ def premium_required():
     ), 402
 
 
-def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0):
-    shown = [] if added else [present_post(row) for row in posts]
+def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0, premium=True):
+    shown = [] if added else [present_post(row, post_is_locked(row, premium)) for row in posts]
     if added:
         total = 0
         counts = empty_counts()
@@ -155,7 +155,7 @@ def lookup_payload(user, posts, added, username, total=None, counts=None, locked
     }
 
 
-def present_post(row):
+def present_post(row, locked=False):
     deleted = bool(row.get("is_deleted"))
     when = format_when(row.get("posted_at"))
     detail = "Removed from the profile" if deleted else "On the profile"
@@ -180,7 +180,8 @@ def present_post(row):
         "detail": detail,
         "status": "Deleted" if deleted else "Archived",
         "type": kind,
-        "mediaUrl": "/api/media/%s" % post_id if chunks and kind != "images" else None,
+        "locked": bool(locked),
+        "mediaUrl": None if locked else ("/api/media/%s" % post_id if chunks and kind != "images" else None),
         "thumbnailUrl": "/api/thumb/%s" % post_id if row.get("thumbnail") else None,
         "imageUrls": image_urls,
         "imageCount": len(image_urls),
@@ -213,18 +214,17 @@ def lookup():
         user, added = store.ensure_user(username)
         premium = viewer_is_premium()
         cutoff = None if premium else free_cutoff()
-        visible = None if premium else free_visible_filter(cutoff)
         if added:
             page = {"posts": [], "total": 0}
             counts = empty_counts()
             locked = 0
         else:
-            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "", visible)
-            counts = store.post_counts(user.get("sec_uid"), visible)
+            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "")
+            counts = store.post_counts(user.get("sec_uid"))
             locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts, locked))
+    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts, locked, premium))
 
 
 @app.get("/api/posts")
@@ -242,7 +242,6 @@ def posts():
     limit = clamp_limit(request.args.get("limit"))
     premium = viewer_is_premium()
     cutoff = None if premium else free_cutoff()
-    visible = None if premium else free_visible_filter(cutoff)
     try:
         user = store.get_user(username)
         if not user:
@@ -255,14 +254,13 @@ def posts():
             kind,
             status,
             clean_search(request.args.get("q")),
-            visible,
         )
         locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     return jsonify(
         {
-            "posts": [present_post(row) for row in page["posts"]],
+            "posts": [present_post(row, post_is_locked(row, premium)) for row in page["posts"]],
             "total": page["total"],
             "offset": offset,
             "limit": limit,
@@ -308,9 +306,7 @@ def one_post(username, post_id):
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     if not user or not row or row.get("sec_uid") != user.get("sec_uid"):
         return jsonify({"error": "Post not found."}), 404
-    if post_is_locked(row, viewer_is_premium()):
-        return premium_required()
-    payload = present_post(row)
+    payload = present_post(row, post_is_locked(row, viewer_is_premium()))
     payload["username"] = user.get("username") or clean_username(username)
     payload["name"] = user.get("name") or ""
     payload["pfpUrl"] = "/api/pfp/%s" % payload["username"] if user.get("pfp") else None
@@ -388,8 +384,6 @@ def thumb(post_id):
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
-    if post_is_locked(row, viewer_is_premium()):
-        return premium_required()
     stored = (row or {}).get("thumbnail")
     if not stored:
         return jsonify({"error": "No thumbnail stored for this post."}), 404
