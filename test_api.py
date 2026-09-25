@@ -1,7 +1,7 @@
 import unittest
 
 from app import app, lookup_payload, present_post
-from media import content_type
+from media import content_type, media_plan, take_bytes
 
 
 class ApiTest(unittest.TestCase):
@@ -76,6 +76,37 @@ class ApiTest(unittest.TestCase):
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")
         self.assertEqual(content_type("images", [{"filename": "1.jpg"}]), "image/jpeg")
+
+    def test_video_range_covers_the_tail_without_the_whole_file(self):
+        chunks = [
+            {"index": 0, "size": 100, "url": "https://cdn.example/a"},
+            {"index": 1, "size": 50, "url": "https://cdn.example/b"},
+        ]
+        full = media_plan(chunks, None)
+        self.assertEqual(full["status"], 200)
+        self.assertEqual(full["headers"]["Content-Length"], "150")
+        self.assertEqual(full["headers"]["Accept-Ranges"], "bytes")
+        self.assertNotIn("Content-Range", full["headers"])
+
+        opened = media_plan(chunks, "bytes=0-")
+        self.assertEqual(opened["status"], 206)
+        self.assertEqual(opened["headers"]["Content-Range"], "bytes 0-149/150")
+
+        tail = media_plan(chunks, "bytes=140-")
+        self.assertEqual(tail["status"], 206)
+        self.assertEqual(tail["headers"]["Content-Range"], "bytes 140-149/150")
+        self.assertEqual(tail["headers"]["Content-Length"], "10")
+        self.assertEqual([(item[1], item[2]) for item in tail["slices"]], [(40, 49)])
+
+        across = media_plan(chunks, "bytes=90-109")
+        self.assertEqual([(item[0]["index"], item[1], item[2]) for item in across["slices"]], [(0, 90, 99), (1, 0, 9)])
+
+        self.assertEqual(media_plan(chunks, "bytes=500-")["status"], 416)
+        self.assertIsNone(media_plan([{"index": 0, "url": "https://cdn.example/a"}], None)["slices"])
+
+    def test_take_bytes_skips_a_prefix(self):
+        pieces = [b"abcdef", b"ghijkl"]
+        self.assertEqual(b"".join(take_bytes(pieces, 4, 4)), b"efgh")
 
 
 if __name__ == "__main__":

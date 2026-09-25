@@ -5,7 +5,7 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 from db import Database
-from media import DiscordFiles, content_type
+from media import DiscordFiles, content_type, media_plan
 
 app = Flask(__name__)
 
@@ -263,10 +263,15 @@ def media(post_id):
     chunks = (row or {}).get("chunks") or []
     if not chunks:
         return jsonify({"error": "No file stored for this post."}), 404
-    return Response(
-        files.stream(chunks),
-        mimetype=content_type(row.get("type"), chunks),
-    )
+    plan = media_plan(chunks, request.headers.get("Range"))
+    headers = dict(plan["headers"])
+    headers["Cache-Control"] = "private, max-age=3600"
+    if plan["status"] == 416:
+        return Response(status=416, headers=headers)
+    mime = content_type(row.get("type"), chunks)
+    if plan["slices"] is None:
+        return Response(files.stream(chunks), mimetype=mime, headers=headers)
+    return Response(files.stream_slices(plan["slices"]), status=plan["status"], mimetype=mime, headers=headers)
 
 
 @app.get("/api/slide/<post_id>/<int:index>")

@@ -19,7 +19,7 @@ gunicorn --bind 127.0.0.1:8000 app:app
 - `GET /api/posts?user=name&offset=0&limit=12&order=latest|first&type=&status=&q=` — the next page for infinite scroll
 - `GET /api/post/<username>/<post_id>` — one archived post
 - `GET /api/users` — looked-up accounts
-- `GET /api/media/<post_id>` — refreshes the Discord chunk links and streams the file
+- `GET /api/media/<post_id>` — refreshes the Discord chunk links and streams the file. Sends the file size and honors a `Range` header so a video can start without downloading the whole file again.
 - `GET /api/slide/<post_id>/<index>` — one image from a photo post
 - `GET /api/thumb/<post_id>` — refreshes the stored cover image
 - `GET /api/pfp/<username>` — refreshes the stored profile image
