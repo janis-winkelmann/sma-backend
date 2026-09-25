@@ -10,11 +10,14 @@ from media import (
     DiscordFiles,
     audio_header_patch,
     content_type,
+    file_plan,
+    iter_file,
     live_is_recording,
     media_plan,
     moov_end,
     replace_urls,
 )
+from playback import ensure_playable, live_should_remux
 
 app = Flask(__name__)
 
@@ -402,7 +405,7 @@ def audio_patch_for(files, post_id, chunks):
     ordered = sorted(chunks, key=lambda item: item.get("index") or 0)
     first = ordered[0] if ordered else None
     if not first or not first.get("url"):
-        return None
+        return None, b""
     key = (
         str(post_id),
         str(first.get("message_id") or ""),
@@ -416,14 +419,38 @@ def audio_patch_for(files, post_id, chunks):
         header = fetch_moov(mapping.get(first.get("url")) or first.get("url"))
     except requests.RequestException:
         app.logger.exception("live audio header for %s", post_id)
-        return None
+        return None, b""
     if not header:
-        return None
+        return None, b""
     patch = audio_header_patch(header)
-    _AUDIO_PATCHES[key] = patch
+    brand = header[8:12] if len(header) >= 12 else b""
+    _AUDIO_PATCHES[key] = (patch, brand)
     if patch:
         app.logger.info("restored live audio config for %s", post_id)
-    return patch
+    return patch, brand
+
+
+def _remember_chunks(store, post_id, chunks, updates):
+    rewritten = replace_urls(chunks, updates)
+    if rewritten is not None:
+        store.patch_post(post_id, {"chunks": rewritten})
+
+
+def _playable_response(path, range_header, recording):
+    total = os.path.getsize(path)
+    plan = file_plan(total, range_header)
+    headers = dict(plan["headers"])
+    headers["Cache-Control"] = "no-store" if recording else "private, max-age=3600"
+    if plan["status"] == 416:
+        return Response(status=416, headers=headers)
+    if plan["end"] < plan["start"]:
+        return Response(b"", status=plan["status"], mimetype="video/mp4", headers=headers)
+    return Response(
+        iter_file(path, plan["start"], plan["end"]),
+        status=plan["status"],
+        mimetype="video/mp4",
+        headers=headers,
+    )
 
 
 @app.get("/api/media/<post_id>")
@@ -440,7 +467,18 @@ def media(post_id):
         return jsonify({"error": "No file stored for this post."}), 404
     patch = None
     if (row or {}).get("type") == "live":
-        patch = audio_patch_for(files, post_id, chunks)
+        patch, brand = audio_patch_for(files, post_id, chunks)
+        if live_should_remux(patch, brand):
+            playable = ensure_playable(
+                post_id,
+                chunks,
+                files,
+                patch,
+                remember=lambda updates: _remember_chunks(store, post_id, chunks, updates),
+            )
+            if playable:
+                app.logger.info("serving remuxed live %s", post_id)
+                return _playable_response(playable, request.headers.get("Range"), live_is_recording(chunks))
     plan = media_plan(chunks, request.headers.get("Range"), patch)
     headers = dict(plan["headers"])
     if row.get("type") == "live" and live_is_recording(chunks):

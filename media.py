@@ -232,6 +232,49 @@ def _with_audio_patch(ordered, audio_patch):
     return virtual
 
 
+def file_plan(total, range_header):
+    """Byte range for one local file. Same status and headers as media_plan."""
+    if total <= 0:
+        return {
+            "status": 200,
+            "headers": {"Content-Length": "0", "Accept-Ranges": "bytes"},
+            "start": 0,
+            "end": -1,
+        }
+    parsed = parse_range(range_header, total)
+    if parsed is None:
+        return {
+            "status": 416,
+            "headers": {"Content-Range": "bytes */%s" % total, "Accept-Ranges": "bytes"},
+            "start": None,
+            "end": None,
+        }
+    start, end, partial = parsed
+    headers = {
+        "Accept-Ranges": "bytes",
+        "Content-Length": str(end - start + 1),
+    }
+    status = 200
+    if partial:
+        status = 206
+        headers["Content-Range"] = "bytes %s-%s/%s" % (start, end, total)
+    return {"status": status, "headers": headers, "start": start, "end": end}
+
+
+def iter_file(path, start, end):
+    remaining = end - start + 1
+    if remaining <= 0:
+        return
+    with open(path, "rb") as handle:
+        handle.seek(start)
+        while remaining > 0:
+            piece = handle.read(min(256 * 1024, remaining))
+            if not piece:
+                return
+            remaining -= len(piece)
+            yield piece
+
+
 def media_plan(chunks, range_header, audio_patch=None):
     ordered = sorted(chunks, key=lambda item: item.get("index") or 0)
     sizes = [chunk_size(chunk) for chunk in ordered]

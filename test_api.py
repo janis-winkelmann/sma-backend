@@ -10,12 +10,18 @@ from db import Database
 from media import (
     audio_header_patch,
     content_type,
+    file_plan,
+    iter_file,
     link_is_live,
     live_is_recording,
     media_plan,
     replace_urls,
     take_bytes,
 )
+from playback import assemble_source, cached_choice, ffmpeg_remux_args, live_should_remux, live_signature
+import playback
+import tempfile
+import shutil
 
 
 class ApiTest(unittest.TestCase):
@@ -319,6 +325,69 @@ class ApiTest(unittest.TestCase):
     def test_take_bytes_skips_a_prefix(self):
         pieces = [b"abcdef", b"ghijkl"]
         self.assertEqual(b"".join(take_bytes(pieces, 4, 4)), b"efgh")
+
+    def test_a_local_file_range_matches_the_video_plan(self):
+        full = file_plan(150, None)
+        self.assertEqual(full["status"], 200)
+        self.assertEqual((full["start"], full["end"]), (0, 149))
+        self.assertEqual(full["headers"]["Content-Length"], "150")
+        self.assertNotIn("Content-Range", full["headers"])
+        opened = file_plan(150, "bytes=0-")
+        self.assertEqual(opened["status"], 206)
+        self.assertEqual(opened["headers"]["Content-Range"], "bytes 0-149/150")
+        middle = file_plan(150, "bytes=2-5")
+        self.assertEqual((middle["start"], middle["end"]), (2, 5))
+        self.assertEqual(file_plan(150, "bytes=500-")["status"], 416)
+        self.assertEqual(file_plan(0, None)["headers"]["Content-Length"], "0")
+        directory = tempfile.mkdtemp()
+        try:
+            path = os.path.join(directory, "clip.bin")
+            with open(path, "wb") as handle:
+                handle.write(b"0123456789")
+            self.assertEqual(b"".join(iter_file(path, 2, 5)), b"2345")
+        finally:
+            shutil.rmtree(directory)
+
+    def test_fragmented_live_audio_is_remuxed_to_faststart_aac(self):
+        self.assertTrue(live_should_remux((b"abc", 1), b"iso5"))
+        self.assertTrue(live_should_remux(None, b"iso5"))
+        self.assertFalse(live_should_remux(None, b"isom"))
+        self.assertFalse(live_should_remux(None, b""))
+        args = ffmpeg_remux_args("/tmp/in.mp4", "/tmp/out.mp4")
+        self.assertIn("-c:v", args)
+        self.assertEqual(args[args.index("-c:v") + 1], "copy")
+        self.assertEqual(args[args.index("-c:a") + 1], "aac")
+        self.assertEqual(args[args.index("-b:a") + 1], "96k")
+        self.assertIn("+faststart", args)
+        self.assertEqual(assemble_source([b"HELLO-WORLD", b"TAIL"], b"HEY", 5), b"HEY-WORLDTAIL")
+        self.assertEqual(assemble_source([b"abc", b"de"], None, 0), b"abcde")
+
+    def test_a_live_snapshot_keeps_serving_the_file_it_started_with(self):
+        root = tempfile.mkdtemp()
+        previous = playback.CACHE_ROOT
+        playback.CACHE_ROOT = root
+        try:
+            directory = os.path.join(root, "post")
+            os.makedirs(directory)
+            chunks = [{"index": 0, "size": 8, "message_id": "m", "filename": "a.part000"}]
+            signature = live_signature("post", chunks)
+            older = os.path.join(directory, "older.mp4")
+            exact = os.path.join(directory, signature + ".mp4")
+            with open(older, "wb") as handle:
+                handle.write(b"old")
+            grown = list(chunks) + [{"index": 1, "size": 8, "message_id": "n", "filename": "a.part001"}]
+            self.assertNotEqual(live_signature("post", grown), signature)
+            self.assertEqual(os.path.realpath(cached_choice(directory, signature)), os.path.realpath(older))
+            with open(exact, "wb") as handle:
+                handle.write(b"exact-bytes")
+            self.assertEqual(os.path.realpath(cached_choice(directory, signature)), os.path.realpath(exact))
+            pin = os.path.join(directory, signature + ".pin")
+            with open(pin, "w") as handle:
+                handle.write(os.path.realpath(older))
+            self.assertEqual(os.path.realpath(cached_choice(directory, signature)), os.path.realpath(older))
+        finally:
+            playback.CACHE_ROOT = previous
+            shutil.rmtree(root)
 
 
 if __name__ == "__main__":
