@@ -42,17 +42,26 @@ class Database(object):
         return rows[0], True
 
     def list_users(self):
-        response = self.session.get(
-            self.base + "/tiktok_users",
-            params={
-                "select": "username,name,bio,pfp,visibility",
-                "order": "created_at.desc",
-                "limit": "200",
-            },
-            timeout=30,
-        )
-        response.raise_for_status()
-        return response.json()
+        rows = []
+        offset = 0
+        page_size = 1000
+        while True:
+            response = self.session.get(
+                self.base + "/tiktok_users",
+                params={
+                    "select": "username,name,bio,pfp,visibility",
+                    "order": "created_at.desc",
+                    "limit": str(page_size),
+                    "offset": str(offset),
+                },
+                timeout=30,
+            )
+            response.raise_for_status()
+            batch = response.json()
+            rows.extend(batch)
+            if len(batch) < page_size:
+                return rows
+            offset += page_size
 
     def posts_page(self, sec_uid, offset, limit, order, kind, status, query, visible_or=None):
         if not sec_uid:

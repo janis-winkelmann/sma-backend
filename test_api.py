@@ -1,5 +1,6 @@
 import os
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 
 from app import app, free_visible_filter, lookup_payload, post_is_locked, present_post
@@ -22,6 +23,65 @@ class ApiTest(unittest.TestCase):
         response = self.client.get("/api/platforms")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["platforms"], [{"id": "tiktok", "label": "TikTok"}])
+
+    def test_profile_reads_an_existing_account_without_creating_one(self):
+        class Store(object):
+            def get_user(self, username):
+                self.username = username
+                return {
+                    "username": username,
+                    "name": "Khaby Lame",
+                    "bio": "hello",
+                    "visibility": "public",
+                    "sec_uid": "sec",
+                    "pfp": "https://cdn.example/a.jpg",
+                }
+
+            def posts_page(self, sec_uid, offset, limit, order, kind, status, query):
+                return {
+                    "posts": [{
+                        "post_id": "1",
+                        "type": "video",
+                        "caption": "Clip",
+                        "is_deleted": True,
+                        "posted_at": "2026-01-01T00:00:00Z",
+                        "chunks": [{"url": "https://cdn.example/a"}],
+                    }],
+                    "total": 40,
+                }
+
+            def post_counts(self, sec_uid):
+                return {"all": 40, "video": 40, "images": 0, "live": 0, "story": 0, "archived": 10, "deleted": 30}
+
+            def locked_video_count(self, sec_uid, cutoff):
+                return 3
+
+            def ensure_user(self, username):
+                raise AssertionError("profile lookup must not add an account")
+
+        store = Store()
+        with patch("app.database", return_value=store):
+            response = self.client.get("/api/profile/Khaby.Lame", headers={"X-Sma-Plan": "free"})
+        self.assertEqual(response.status_code, 200)
+        body = response.get_json()
+        self.assertEqual(store.username, "khaby.lame")
+        self.assertEqual(body["name"], "Khaby Lame")
+        self.assertEqual(body["total"], 40)
+        self.assertEqual(body["posts"][0]["title"], "Clip")
+        self.assertTrue(body["posts"][0]["locked"])
+        self.assertIsNone(body["posts"][0]["mediaUrl"])
+
+    def test_profile_is_missing_when_the_account_was_never_added(self):
+        class Store(object):
+            def get_user(self, username):
+                return None
+
+            def ensure_user(self, username):
+                raise AssertionError("profile lookup must not add an account")
+
+        with patch("app.database", return_value=Store()):
+            response = self.client.get("/api/profile/nobody")
+        self.assertEqual(response.status_code, 404)
 
     def test_other_platforms_are_rejected(self):
         response = self.client.get("/api/lookup?user=sma&platform=instagram")

@@ -291,6 +291,28 @@ def posts():
     )
 
 
+@app.get("/api/profile/<username>")
+def profile(username):
+    username = clean_username(username)
+    if not username:
+        return jsonify({"error": "Enter a username."}), 400
+    store = database()
+    if store is None:
+        return jsonify({"error": "Supabase is not configured."}), 503
+    try:
+        user = store.get_user(username)
+        if not user:
+            return jsonify({"error": "Account not found."}), 404
+        premium = viewer_is_premium()
+        cutoff = None if premium else free_cutoff()
+        page = store.posts_page(user.get("sec_uid"), 0, 24, "latest", "all", "all", "")
+        counts = store.post_counts(user.get("sec_uid"))
+        locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    return jsonify(lookup_payload(user, page["posts"], False, username, page["total"], counts, locked, premium))
+
+
 @app.get("/api/users")
 def users():
     store = database()
