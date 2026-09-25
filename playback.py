@@ -83,6 +83,8 @@ def ffmpeg_remux_args(source, target):
         "1",
         "-movflags",
         "+faststart",
+        "-f",
+        "mp4",
         target,
     ]
 
@@ -526,7 +528,6 @@ def run_job(path):
                 prefix, replaced = derived
                 print("derived audio patch", flush=True)
         _write_source(parts, source, prefix, replaced)
-        _cleanup_parts(directory)
         with open(source, "rb") as handle:
             magic = handle.read(12)
         if len(magic) < 12 or magic[4:8] != b"ftyp":
@@ -544,6 +545,7 @@ def run_job(path):
         elif not _nonempty(tmp):
             raise RuntimeError("remux produced an empty file")
         os.replace(tmp, target)
+        _cleanup_parts(directory)
         _prune(directory, KEEP_FILES)
         failed = job.get("failed")
         if failed and os.path.isfile(failed):
