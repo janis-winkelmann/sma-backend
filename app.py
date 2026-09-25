@@ -9,10 +9,12 @@ from db import Database
 from media import (
     DiscordFiles,
     audio_header_patch,
+    cached_image_bytes,
     content_type,
     file_plan,
     iter_file,
     live_is_recording,
+    load_cached_image,
     media_plan,
     moov_end,
     replace_urls,
@@ -232,12 +234,28 @@ def load_archive(store, user, premium, limit):
 IMAGE_CACHE = "public, max-age=86400"
 
 
-def cached_image(upstream):
+def image_response(data, content_type):
     return Response(
-        upstream.iter_content(256 * 1024),
-        mimetype=upstream.headers.get("Content-Type", "image/jpeg"),
-        headers={"Cache-Control": IMAGE_CACHE},
+        data,
+        mimetype=content_type or "image/jpeg",
+        headers={"Cache-Control": IMAGE_CACHE, "Content-Length": str(len(data))},
     )
+
+
+def deliver_image(kind, files, stored, save):
+    hit = load_cached_image(kind, stored)
+    if hit:
+        return image_response(*hit)
+    try:
+        url = remember_link(files, stored, save)
+    except requests.RequestException:
+        app.logger.warning("image link refresh failed")
+        url = stored
+    try:
+        data, content_type = cached_image_bytes(kind, url)
+    except requests.RequestException:
+        return None
+    return image_response(data, content_type)
 
 
 @app.get("/health")
@@ -527,10 +545,16 @@ def slide(post_id, index):
     stored = (match or {}).get("url")
     if not stored:
         return jsonify({"error": "No slide stored for this post."}), 404
-    url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"slides": replace_urls(slides, {stored: fresh})}))
-    upstream = requests.get(url, stream=True, timeout=30)
-    upstream.raise_for_status()
-    return cached_image(upstream)
+    image = deliver_image(
+        "slide",
+        files,
+        stored,
+        lambda fresh: store.patch_post(post_id, {"slides": replace_urls(slides, {stored: fresh})}),
+    )
+    if image is None:
+        app.logger.warning("slide %s/%s unavailable", post_id, index)
+        return jsonify({"error": "Slide is unavailable."}), 502
+    return image
 
 
 @app.get("/api/thumb/<post_id>")
@@ -543,10 +567,11 @@ def thumb(post_id):
     stored = (row or {}).get("thumbnail")
     if not stored:
         return jsonify({"error": "No thumbnail stored for this post."}), 404
-    url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
-    upstream = requests.get(url, stream=True, timeout=30)
-    upstream.raise_for_status()
-    return cached_image(upstream)
+    image = deliver_image("thumb", files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
+    if image is None:
+        app.logger.warning("thumbnail %s unavailable", post_id)
+        return jsonify({"error": "Thumbnail is unavailable."}), 502
+    return image
 
 
 @app.get("/api/pfp/<username>")
@@ -558,11 +583,13 @@ def pfp(username):
     user = store.get_user(clean_username(username))
     if not user or not user.get("pfp"):
         return jsonify({"error": "No profile image stored."}), 404
-    url = remember_link(
+    image = deliver_image(
+        "pfp",
         files,
         user["pfp"],
         lambda fresh: store.patch_user(clean_username(username), {"pfp": fresh}),
     )
-    upstream = requests.get(url, stream=True, timeout=30)
-    upstream.raise_for_status()
-    return cached_image(upstream)
+    if image is None:
+        app.logger.warning("profile image %s unavailable", clean_username(username))
+        return jsonify({"error": "Profile image is unavailable."}), 502
+    return image

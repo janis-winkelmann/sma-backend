@@ -1,3 +1,6 @@
+import hashlib
+import os
+import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
@@ -6,6 +9,9 @@ import requests
 API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/janis-winkelmann/sma-backend, 1.0)"
 EXPIRY_LEEWAY = 120
+IMAGE_ROOT = os.environ.get("SMA_IMAGE_CACHE", "/var/cache/sma-images")
+IMAGE_MAX_BYTES = 12 * 1024 * 1024
+IMAGE_MAX_AGE = 7 * 24 * 3600
 
 
 def link_expiry(url):
@@ -18,6 +24,106 @@ def link_expiry(url):
         return int(raw, 16)
     except ValueError:
         return None
+
+
+def looks_like_image(data, content_type=""):
+    if not data or len(data) > IMAGE_MAX_BYTES:
+        return False
+    if data[:3] == b"\xff\xd8\xff":
+        return True
+    if data[:8] == b"\x89PNG\r\n\x1a\n":
+        return True
+    if data[:6] in (b"GIF87a", b"GIF89a"):
+        return True
+    if len(data) >= 12 and data[:4] == b"RIFF" and data[8:12] == b"WEBP":
+        return True
+    return content_type.split(";", 1)[0].strip().lower().startswith("image/")
+
+
+def attachment_key(url):
+    return urlparse(url or "").path or (url or "")
+
+
+def _image_paths(kind, url):
+    digest = hashlib.sha256(("%s\n%s" % (kind, attachment_key(url))).encode("utf-8")).hexdigest()[:32]
+    directory = os.path.join(IMAGE_ROOT, kind)
+    path = os.path.join(directory, digest)
+    return directory, path, path + ".type"
+
+
+def load_cached_image(kind, url):
+    _directory, path, meta = _image_paths(kind, url)
+    try:
+        if not os.path.isfile(path) or os.path.getsize(path) <= 16:
+            return None
+        if time.time() - os.path.getmtime(path) > IMAGE_MAX_AGE:
+            return None
+        with open(path, "rb") as handle:
+            data = handle.read()
+        content_type = "image/jpeg"
+        if os.path.isfile(meta):
+            with open(meta) as handle:
+                content_type = handle.read().strip() or content_type
+    except OSError:
+        return None
+    if not looks_like_image(data, content_type):
+        return None
+    return data, content_type
+
+
+def store_cached_image(kind, url, data, content_type):
+    directory, path, meta = _image_paths(kind, url)
+    temporary = path + ".tmp"
+    try:
+        os.makedirs(directory, exist_ok=True)
+        with open(temporary, "wb") as handle:
+            handle.write(data)
+        os.replace(temporary, path)
+        with open(meta, "w") as handle:
+            handle.write(content_type or "image/jpeg")
+    except OSError:
+        try:
+            os.remove(temporary)
+        except OSError:
+            pass
+
+
+def read_image_bytes(url, get=None, attempts=3, pause=None):
+    """Download a whole image. A stalled host is retried instead of streamed to the browser."""
+    fetch = get or _download_image
+    wait = pause or time.sleep
+    last = "error"
+    for attempt in range(attempts):
+        try:
+            data, content_type = fetch(url)
+            if looks_like_image(data, content_type):
+                return data, (content_type or "image/jpeg").split(";", 1)[0].strip() or "image/jpeg"
+            last = "invalid"
+        except requests.RequestException as exc:
+            status = getattr(getattr(exc, "response", None), "status_code", None)
+            last = str(status or type(exc).__name__)
+        if attempt + 1 < attempts:
+            wait(0.25 * (attempt + 1))
+    raise requests.RequestException(last)
+
+
+def _download_image(url):
+    response = requests.get(url, timeout=(4, 8))
+    try:
+        response.raise_for_status()
+        content_type = (response.headers.get("Content-Type") or "image/jpeg").split(";", 1)[0].strip()
+        return response.content, content_type
+    finally:
+        response.close()
+
+
+def cached_image_bytes(kind, url, get=None):
+    found = load_cached_image(kind, url)
+    if found:
+        return found
+    data, content_type = read_image_bytes(url, get=get)
+    store_cached_image(kind, url, data, content_type)
+    return data, content_type
 
 
 def link_is_live(url, now=None):
