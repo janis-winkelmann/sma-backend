@@ -361,7 +361,12 @@ def audio_patch_for(files, post_id, chunks):
     first = ordered[0] if ordered else None
     if not first or not first.get("url"):
         return None
-    key = (str(post_id), str(first.get("filename") or ""), int(first.get("size") or 0))
+    key = (
+        str(post_id),
+        str(first.get("message_id") or ""),
+        str(first.get("filename") or ""),
+        int(first.get("size") or 0),
+    )
     if key in _AUDIO_PATCHES:
         return _AUDIO_PATCHES[key]
     try:
