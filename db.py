@@ -104,7 +104,6 @@ class Database(object):
         return self._count(
             sec_uid,
             {
-                "type": "in.(video,live)",
                 "or": "(posted_at.lt.%s,posted_at.is.null)" % cutoff,
             },
         )

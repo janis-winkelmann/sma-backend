@@ -49,12 +49,14 @@ class ApiTest(unittest.TestCase):
                 "is_deleted": False,
                 "posted_at": "2026-01-01T00:00:00Z",
                 "chunks": [{"url": "https://cdn.discordapp.com/attachments/1/2/123.part000"}],
+                "slides": [{"url": "https://cdn.discordapp.com/attachments/1/2/a.jpg", "index": 0}],
                 "thumbnail": "https://cdn.discordapp.com/attachments/1/2/thumb.jpg",
             },
             True,
         )
         self.assertTrue(payload["locked"])
         self.assertIsNone(payload["mediaUrl"])
+        self.assertEqual(payload["imageUrls"], [])
         self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
 
     def test_photo_post_lists_each_slide(self):
@@ -98,15 +100,17 @@ class ApiTest(unittest.TestCase):
         old = {"type": "video", "posted_at": "2026-08-01T00:00:00Z"}
         recent = {"type": "video", "posted_at": "2026-09-10T00:00:00Z"}
         photo = {"type": "images", "posted_at": "2020-01-01T00:00:00Z"}
+        recent_photo = {"type": "images", "posted_at": "2026-09-10T00:00:00Z"}
         undated = {"type": "live", "posted_at": None}
         story = {"type": "story", "posted_at": "2020-01-01T00:00:00Z"}
         self.assertTrue(post_is_locked(old, False, now))
         self.assertFalse(post_is_locked(recent, False, now))
-        self.assertFalse(post_is_locked(photo, False, now))
+        self.assertTrue(post_is_locked(photo, False, now))
+        self.assertFalse(post_is_locked(recent_photo, False, now))
         self.assertTrue(post_is_locked(undated, False, now))
-        self.assertFalse(post_is_locked(story, False, now))
+        self.assertTrue(post_is_locked(story, False, now))
         self.assertFalse(post_is_locked(old, True, now))
-        self.assertIn("posted_at.gte.2026-08-26", free_visible_filter("2026-08-26T00:00:00Z"))
+        self.assertEqual(free_visible_filter("2026-08-26T00:00:00Z"), "posted_at.gte.2026-08-26T00:00:00Z")
 
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")

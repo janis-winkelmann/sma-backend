@@ -101,13 +101,11 @@ def free_cutoff(now=None):
 
 
 def free_visible_filter(cutoff):
-    return "(type.in.(images,story),and(type.in.(video,live),posted_at.gte.%s))" % cutoff
+    return "posted_at.gte.%s" % cutoff
 
 
 def post_is_locked(row, premium, now=None):
     if premium or not row:
-        return False
-    if (row.get("type") or "video") not in ("video", "live"):
         return False
     posted = row.get("posted_at")
     if not posted:
@@ -124,7 +122,7 @@ def post_is_locked(row, premium, now=None):
 
 def premium_required():
     return jsonify(
-        {"error": "Premium is required to view videos older than 30 days.", "locked": True}
+        {"error": "Premium is required to view posts older than 30 days.", "locked": True}
     ), 402
 
 
@@ -173,6 +171,8 @@ def present_post(row, locked=False):
     elif kind == "images" and chunks:
         image_urls = ["/api/media/%s" % post_id]
     else:
+        image_urls = []
+    if locked:
         image_urls = []
     return {
         "id": post_id,
@@ -355,6 +355,8 @@ def slide(post_id, index):
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
+    if post_is_locked(row, viewer_is_premium()):
+        return premium_required()
     slides = (row or {}).get("slides") or []
     match = None
     for item in slides:
