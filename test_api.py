@@ -2,7 +2,7 @@ import unittest
 from datetime import datetime, timezone
 
 from app import app, free_visible_filter, lookup_payload, post_is_locked, present_post
-from media import content_type, link_is_live, media_plan, replace_urls, take_bytes
+from media import content_type, link_is_live, live_is_recording, media_plan, replace_urls, take_bytes
 
 
 class ApiTest(unittest.TestCase):
@@ -102,15 +102,28 @@ class ApiTest(unittest.TestCase):
         photo = {"type": "images", "posted_at": "2020-01-01T00:00:00Z"}
         recent_photo = {"type": "images", "posted_at": "2026-09-10T00:00:00Z"}
         undated = {"type": "live", "posted_at": None}
+        recent_live = {"type": "live", "posted_at": "2026-09-24T00:00:00Z"}
         story = {"type": "story", "posted_at": "2020-01-01T00:00:00Z"}
         self.assertTrue(post_is_locked(old, False, now))
         self.assertFalse(post_is_locked(recent, False, now))
         self.assertTrue(post_is_locked(photo, False, now))
         self.assertFalse(post_is_locked(recent_photo, False, now))
         self.assertTrue(post_is_locked(undated, False, now))
+        self.assertTrue(post_is_locked(recent_live, False, now))
+        self.assertFalse(post_is_locked(recent_live, True, now))
         self.assertTrue(post_is_locked(story, False, now))
         self.assertFalse(post_is_locked(old, True, now))
         self.assertEqual(free_visible_filter("2026-08-26T00:00:00Z"), "posted_at.gte.2026-08-26T00:00:00Z")
+
+    def test_a_live_stays_recording_until_it_is_closed_or_goes_quiet(self):
+        now = datetime(2026, 9, 25, 12, 0, tzinfo=timezone.utc)
+        fresh = [{"index": 0, "uploaded_at": "2026-09-25T11:58:00Z"}]
+        stale = [{"index": 0, "uploaded_at": "2026-09-25T11:00:00Z"}]
+        closed = [{"index": 0, "uploaded_at": "2026-09-25T11:59:00Z", "closed": True}]
+        self.assertTrue(live_is_recording(fresh, now))
+        self.assertFalse(live_is_recording(stale, now))
+        self.assertFalse(live_is_recording(closed, now))
+        self.assertFalse(live_is_recording([], now))
 
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")

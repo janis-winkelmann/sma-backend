@@ -5,7 +5,7 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 from db import Database
-from media import DiscordFiles, content_type, media_plan, replace_urls
+from media import DiscordFiles, content_type, live_is_recording, media_plan, replace_urls
 
 app = Flask(__name__)
 
@@ -107,6 +107,8 @@ def free_visible_filter(cutoff):
 def post_is_locked(row, premium, now=None):
     if premium or not row:
         return False
+    if row.get("type") == "live":
+        return True
     posted = row.get("posted_at")
     if not posted:
         return True
@@ -120,10 +122,12 @@ def post_is_locked(row, premium, now=None):
     return parsed < cutoff
 
 
-def premium_required():
-    return jsonify(
-        {"error": "Premium is required to view posts older than 30 days.", "locked": True}
-    ), 402
+def premium_required(row=None):
+    if row and row.get("type") == "live":
+        error = "Premium is required to watch lives."
+    else:
+        error = "Premium is required to view posts older than 30 days."
+    return jsonify({"error": error, "locked": True}), 402
 
 
 def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0, premium=True):
@@ -186,6 +190,7 @@ def present_post(row, locked=False):
         "imageUrls": image_urls,
         "imageCount": len(image_urls),
         "postedAt": row.get("posted_at") or None,
+        "recording": kind == "live" and live_is_recording(chunks),
     }
 
 
@@ -321,13 +326,16 @@ def media(post_id):
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
     if post_is_locked(row, viewer_is_premium()):
-        return premium_required()
+        return premium_required(row)
     chunks = (row or {}).get("chunks") or []
     if not chunks:
         return jsonify({"error": "No file stored for this post."}), 404
     plan = media_plan(chunks, request.headers.get("Range"))
     headers = dict(plan["headers"])
-    headers["Cache-Control"] = "private, max-age=3600"
+    if row.get("type") == "live" and live_is_recording(chunks):
+        headers["Cache-Control"] = "no-store"
+    else:
+        headers["Cache-Control"] = "private, max-age=3600"
     if plan["status"] == 416:
         return Response(status=416, headers=headers)
     if plan["slices"] is None:
@@ -356,7 +364,7 @@ def slide(post_id, index):
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
     if post_is_locked(row, viewer_is_premium()):
-        return premium_required()
+        return premium_required(row)
     slides = (row or {}).get("slides") or []
     match = None
     for item in slides:

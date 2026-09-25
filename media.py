@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import requests
@@ -144,6 +144,33 @@ def take_bytes(pieces, count, skip=0):
         remaining -= len(piece)
         if remaining <= 0:
             return
+
+
+def chunk_uploaded_at(chunk):
+    raw = chunk.get("uploaded_at") if isinstance(chunk, dict) else None
+    if not raw:
+        return None
+    try:
+        parsed = datetime.fromisoformat(str(raw).replace("Z", "+00:00"))
+    except (TypeError, ValueError):
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed
+
+
+def live_is_recording(chunks, now=None):
+    moment = now or datetime.now(timezone.utc)
+    usable = [chunk for chunk in (chunks or []) if isinstance(chunk, dict)]
+    if not usable:
+        return False
+    last = max(usable, key=lambda chunk: int(chunk.get("index") or 0))
+    if last.get("closed"):
+        return False
+    latest = chunk_uploaded_at(last)
+    if latest is None:
+        return False
+    return moment - latest < timedelta(minutes=6)
 
 
 def content_type(post_type, chunks):

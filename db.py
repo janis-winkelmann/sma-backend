@@ -104,7 +104,7 @@ class Database(object):
         return self._count(
             sec_uid,
             {
-                "or": "(posted_at.lt.%s,posted_at.is.null)" % cutoff,
+                "or": "(posted_at.lt.%s,posted_at.is.null,type.eq.live)" % cutoff,
             },
         )
 
