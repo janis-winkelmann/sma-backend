@@ -54,7 +54,7 @@ class Database(object):
         response.raise_for_status()
         return response.json()
 
-    def posts_page(self, sec_uid, offset, limit, order, kind, status, query):
+    def posts_page(self, sec_uid, offset, limit, order, kind, status, query, visible_or=None):
         if not sec_uid:
             return {"posts": [], "total": 0}
         params = {
@@ -74,6 +74,8 @@ class Database(object):
             params["is_deleted"] = "eq.true"
         if query:
             params["caption"] = "ilike.*%s*" % query
+        if visible_or:
+            params["or"] = visible_or
         response = self.session.get(
             self.base + "/tiktok_posts",
             headers={"Prefer": "count=exact"},
@@ -84,16 +86,28 @@ class Database(object):
         rows = response.json()
         return {"posts": rows, "total": content_range_total(response.headers.get("Content-Range"), len(rows))}
 
-    def post_counts(self, sec_uid):
+    def post_counts(self, sec_uid, visible_or=None):
         counts = empty_counts()
         if not sec_uid:
             return counts
-        counts["all"] = self._count(sec_uid, None)
+        window = {"or": visible_or} if visible_or else {}
+        counts["all"] = self._count(sec_uid, window or None)
         for kind in ("video", "images", "live", "story"):
-            counts[kind] = self._count(sec_uid, {"type": "eq.%s" % kind})
-        counts["archived"] = self._count(sec_uid, {"is_deleted": "eq.false"})
-        counts["deleted"] = self._count(sec_uid, {"is_deleted": "eq.true"})
+            counts[kind] = self._count(sec_uid, dict(window, type="eq.%s" % kind))
+        counts["archived"] = self._count(sec_uid, dict(window, is_deleted="eq.false"))
+        counts["deleted"] = self._count(sec_uid, dict(window, is_deleted="eq.true"))
         return counts
+
+    def locked_video_count(self, sec_uid, cutoff):
+        if not sec_uid or not cutoff:
+            return 0
+        return self._count(
+            sec_uid,
+            {
+                "type": "in.(video,live)",
+                "or": "(posted_at.lt.%s,posted_at.is.null)" % cutoff,
+            },
+        )
 
     def _count(self, sec_uid, extra):
         params = {"select": "post_id", "sec_uid": "eq.%s" % sec_uid, "limit": "1"}

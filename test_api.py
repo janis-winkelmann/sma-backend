@@ -1,6 +1,7 @@
 import unittest
+from datetime import datetime, timezone
 
-from app import app, lookup_payload, present_post
+from app import app, free_visible_filter, lookup_payload, post_is_locked, present_post
 from media import content_type, link_is_live, media_plan, replace_urls, take_bytes
 
 
@@ -36,6 +37,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["mediaUrl"], "/api/media/123")
         self.assertEqual(payload["thumbnailUrl"], "/api/thumb/123")
         self.assertEqual(payload["imageUrls"], [])
+        self.assertEqual(payload["postedAt"], "2026-03-02T12:00:00Z")
 
     def test_photo_post_lists_each_slide(self):
         payload = present_post(
@@ -72,6 +74,21 @@ class ApiTest(unittest.TestCase):
         self.assertFalse(payload["added"])
         self.assertEqual(payload["posts"][0]["title"], "Clip")
         self.assertIsNone(payload["posts"][0]["thumbnailUrl"])
+
+    def test_old_videos_are_locked_for_free_accounts(self):
+        now = datetime(2026, 9, 25, tzinfo=timezone.utc)
+        old = {"type": "video", "posted_at": "2026-08-01T00:00:00Z"}
+        recent = {"type": "video", "posted_at": "2026-09-10T00:00:00Z"}
+        photo = {"type": "images", "posted_at": "2020-01-01T00:00:00Z"}
+        undated = {"type": "live", "posted_at": None}
+        story = {"type": "story", "posted_at": "2020-01-01T00:00:00Z"}
+        self.assertTrue(post_is_locked(old, False, now))
+        self.assertFalse(post_is_locked(recent, False, now))
+        self.assertFalse(post_is_locked(photo, False, now))
+        self.assertTrue(post_is_locked(undated, False, now))
+        self.assertFalse(post_is_locked(story, False, now))
+        self.assertFalse(post_is_locked(old, True, now))
+        self.assertIn("posted_at.gte.2026-08-26", free_visible_filter("2026-08-26T00:00:00Z"))
 
     def test_content_type(self):
         self.assertEqual(content_type("video", [{"filename": "1.part000"}]), "video/mp4")

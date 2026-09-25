@@ -1,5 +1,5 @@
 import os
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request
@@ -88,11 +88,52 @@ def clean_search(value):
     return "".join(kept)[:80].strip()
 
 
-def lookup_payload(user, posts, added, username, total=None, counts=None):
+FREE_WINDOW = timedelta(days=30)
+
+
+def viewer_is_premium():
+    return request.headers.get("X-Sma-Plan", "premium").strip().lower() != "free"
+
+
+def free_cutoff(now=None):
+    moment = now or datetime.now(timezone.utc)
+    return (moment - FREE_WINDOW).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def free_visible_filter(cutoff):
+    return "(type.in.(images,story),and(type.in.(video,live),posted_at.gte.%s))" % cutoff
+
+
+def post_is_locked(row, premium, now=None):
+    if premium or not row:
+        return False
+    if (row.get("type") or "video") not in ("video", "live"):
+        return False
+    posted = row.get("posted_at")
+    if not posted:
+        return True
+    try:
+        parsed = datetime.fromisoformat(posted.replace("Z", "+00:00"))
+    except (AttributeError, ValueError):
+        return True
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    cutoff = (now or datetime.now(timezone.utc)) - FREE_WINDOW
+    return parsed < cutoff
+
+
+def premium_required():
+    return jsonify(
+        {"error": "Premium is required to view videos older than 30 days.", "locked": True}
+    ), 402
+
+
+def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0):
     shown = [] if added else [present_post(row) for row in posts]
     if added:
         total = 0
         counts = empty_counts()
+        locked = 0
     else:
         if total is None:
             total = len(shown)
@@ -110,6 +151,7 @@ def lookup_payload(user, posts, added, username, total=None, counts=None):
         "posts": shown,
         "total": total,
         "counts": counts,
+        "lockedVideos": locked,
     }
 
 
@@ -142,6 +184,7 @@ def present_post(row):
         "thumbnailUrl": "/api/thumb/%s" % post_id if row.get("thumbnail") else None,
         "imageUrls": image_urls,
         "imageCount": len(image_urls),
+        "postedAt": row.get("posted_at") or None,
     }
 
 
@@ -168,15 +211,20 @@ def lookup():
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
         user, added = store.ensure_user(username)
+        premium = viewer_is_premium()
+        cutoff = None if premium else free_cutoff()
+        visible = None if premium else free_visible_filter(cutoff)
         if added:
             page = {"posts": [], "total": 0}
             counts = empty_counts()
+            locked = 0
         else:
-            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "")
-            counts = store.post_counts(user.get("sec_uid"))
+            page = store.posts_page(user.get("sec_uid"), 0, PAGE_LIMIT, "latest", "all", "all", "", visible)
+            counts = store.post_counts(user.get("sec_uid"), visible)
+            locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts))
+    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts, locked))
 
 
 @app.get("/api/posts")
@@ -192,10 +240,13 @@ def posts():
     order = request.args.get("order") if request.args.get("order") in ("latest", "first") else "latest"
     offset = clamp_offset(request.args.get("offset"))
     limit = clamp_limit(request.args.get("limit"))
+    premium = viewer_is_premium()
+    cutoff = None if premium else free_cutoff()
+    visible = None if premium else free_visible_filter(cutoff)
     try:
         user = store.get_user(username)
         if not user:
-            return jsonify({"posts": [], "total": 0, "offset": offset, "limit": limit})
+            return jsonify({"posts": [], "total": 0, "offset": offset, "limit": limit, "lockedVideos": 0})
         page = store.posts_page(
             user.get("sec_uid"),
             offset,
@@ -204,7 +255,9 @@ def posts():
             kind,
             status,
             clean_search(request.args.get("q")),
+            visible,
         )
+        locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     return jsonify(
@@ -213,6 +266,7 @@ def posts():
             "total": page["total"],
             "offset": offset,
             "limit": limit,
+            "lockedVideos": locked,
         }
     )
 
@@ -254,6 +308,8 @@ def one_post(username, post_id):
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
     if not user or not row or row.get("sec_uid") != user.get("sec_uid"):
         return jsonify({"error": "Post not found."}), 404
+    if post_is_locked(row, viewer_is_premium()):
+        return premium_required()
     payload = present_post(row)
     payload["username"] = user.get("username") or clean_username(username)
     payload["name"] = user.get("name") or ""
@@ -268,6 +324,8 @@ def media(post_id):
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
+    if post_is_locked(row, viewer_is_premium()):
+        return premium_required()
     chunks = (row or {}).get("chunks") or []
     if not chunks:
         return jsonify({"error": "No file stored for this post."}), 404
@@ -330,6 +388,8 @@ def thumb(post_id):
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
     row = store.post(post_id)
+    if post_is_locked(row, viewer_is_premium()):
+        return premium_required()
     stored = (row or {}).get("thumbnail")
     if not stored:
         return jsonify({"error": "No thumbnail stored for this post."}), 404
