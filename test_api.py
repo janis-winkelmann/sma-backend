@@ -1,8 +1,17 @@
+import os
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from app import app, free_visible_filter, lookup_payload, post_is_locked, present_post
-from media import content_type, link_is_live, live_is_recording, media_plan, replace_urls, take_bytes
+from media import (
+    audio_header_patch,
+    content_type,
+    link_is_live,
+    live_is_recording,
+    media_plan,
+    replace_urls,
+    take_bytes,
+)
 
 
 class ApiTest(unittest.TestCase):
@@ -173,6 +182,55 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(rewritten[0]["url"], refreshed)
         self.assertEqual(rewritten[1]["url"], live)
         self.assertIsNone(replace_urls([{"url": live}], {}))
+
+    def test_a_recording_live_changes_its_media_url_as_chunks_arrive(self):
+        recent = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
+        payload = present_post(
+            {
+                "post_id": "55",
+                "type": "live",
+                "caption": "Live",
+                "is_deleted": False,
+                "posted_at": recent,
+                "chunks": [
+                    {"index": 0, "size": 8, "uploaded_at": recent},
+                    {"index": 1, "size": 8, "uploaded_at": recent},
+                ],
+            }
+        )
+        self.assertEqual(payload["mediaUrl"], "/api/media/55?n=2")
+        self.assertTrue(payload["recording"])
+
+    def test_a_live_without_an_audio_config_is_playable_and_ranges_stay_aligned(self):
+        fixture = os.path.join(os.path.dirname(__file__), "fixtures", "live_moov.bin")
+        with open(fixture, "rb") as handle:
+            header = handle.read()
+        patch = audio_header_patch(header)
+        self.assertIsNotNone(patch)
+        prefix, replaced = patch
+        self.assertGreater(len(prefix), replaced)
+        self.assertIn(bytes.fromhex("05808080021310"), prefix)
+        restored = prefix + header[replaced:]
+        self.assertIsNone(audio_header_patch(restored))
+
+        chunks = [
+            {"index": 0, "size": 8388608, "url": "https://cdn.example/a"},
+            {"index": 1, "size": 100, "url": "https://cdn.example/b"},
+        ]
+        delta = len(prefix) - replaced
+        full = media_plan(chunks, None, patch)
+        self.assertEqual(full["headers"]["Content-Length"], str(8388608 + 100 + delta))
+
+        inside = media_plan(chunks, "bytes=0-7", patch)
+        piece, start, end = inside["slices"][0]
+        self.assertEqual(bytes(piece["inline"][start : end + 1]), prefix[:8])
+
+        tail = media_plan(chunks, "bytes=%s-%s" % (len(prefix), len(prefix) + 9), patch)
+        self.assertEqual(len(tail["slices"]), 1)
+        chunk, start, end = tail["slices"][0]
+        self.assertEqual(chunk["byte_offset"], replaced)
+        self.assertEqual((start, end), (0, 9))
+        self.assertEqual(chunk["url"], "https://cdn.example/a")
 
     def test_take_bytes_skips_a_prefix(self):
         pieces = [b"abcdef", b"ghijkl"]

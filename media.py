@@ -97,11 +97,148 @@ def slices_for_range(chunks, start, end):
     return slices
 
 
-def media_plan(chunks, range_header):
+# TikTok live HLS audio is HE-AAC: a 24 kHz AAC-LC core with SBR to 48 kHz stereo.
+# empty_moov writes the sample entry before aac_adtstoasc has seen a packet, so the
+# stored file has an SLConfig descriptor and no AudioSpecificConfig. Chrome then
+# rejects the first audio packet and the picture never starts.
+HE_AAC_ESDS = bytes.fromhex(
+    "000000336573647300000000"
+    "0380808022000100048080801440150000000000fa3a0000f720"
+    "05808080021310"
+    "068080800102"
+)
+_CONTAINER_BOXES = (b"moov", b"trak", b"mdia", b"minf", b"stbl", b"stsd")
+
+
+def moov_end(data):
+    """Byte length through the moov box, or None when this is not an fMP4 header."""
+    if len(data) < 16 or data[4:8] != b"ftyp":
+        return None
+    ftyp = int.from_bytes(data[:4], "big")
+    if ftyp < 8 or ftyp > 1024 * 1024:
+        return None
+    if len(data) < ftyp + 8:
+        return ftyp + 8
+    if data[ftyp + 4 : ftyp + 8] != b"moov":
+        return None
+    moov = int.from_bytes(data[ftyp : ftyp + 4], "big")
+    if moov < 8 or moov > 8 * 1024 * 1024:
+        return None
+    return ftyp + moov
+
+
+def _descriptor_size(data, offset, end):
+    size = 0
+    read = 0
+    while read < 4 and offset + read < end:
+        byte = data[offset + read]
+        read += 1
+        size = (size << 7) | (byte & 0x7F)
+        if byte < 0x80:
+            return size, read
+    return None
+
+
+def _descriptors_have_tag(data, offset, end, tag):
+    while offset + 2 <= end:
+        kind = data[offset]
+        parsed = _descriptor_size(data, offset + 1, end)
+        if parsed is None:
+            return False
+        size, header = parsed
+        body = offset + 1 + header
+        if size < 0 or body + size > end:
+            return False
+        if kind == tag:
+            return True
+        if kind in (0x03, 0x04):
+            inner = body + (3 if kind == 0x03 else 13)
+            if inner < body + size and _descriptors_have_tag(data, inner, body + size, tag):
+                return True
+        offset = body + size
+    return False
+
+
+def _bump_containers(buf, box_start, delta):
+    def walk(start, end):
+        offset = start
+        while offset + 8 <= end:
+            size = int.from_bytes(buf[offset : offset + 4], "big")
+            kind = bytes(buf[offset + 4 : offset + 8])
+            if size < 8 or offset + size > len(buf):
+                return
+            if offset >= box_start:
+                return
+            if box_start < offset + size:
+                buf[offset : offset + 4] = (size + delta).to_bytes(4, "big")
+                if kind in _CONTAINER_BOXES:
+                    walk(offset + 8, offset + size)
+            offset += size
+
+    walk(0, len(buf))
+
+
+def audio_header_patch(data):
+    """Return (prefix, replaced) when the audio sample entry has no decoder config.
+
+    prefix replaces the original bytes data[:replaced]. The remainder of the file
+    stays byte-for-byte identical, shifted forward by len(prefix) - replaced.
+    """
+    if moov_end(data) is None or len(data) < 32:
+        return None
+    mp4a = data.find(b"mp4a")
+    if mp4a < 4:
+        return None
+    entry_start = mp4a - 4
+    entry_size = int.from_bytes(data[entry_start : entry_start + 4], "big")
+    if entry_size < 36 or entry_start + entry_size > len(data):
+        return None
+    esds_at = data.find(b"esds", mp4a, entry_start + entry_size)
+    if esds_at < 4:
+        return None
+    box_start = esds_at - 4
+    old_size = int.from_bytes(data[box_start : box_start + 4], "big")
+    if old_size < 12 or box_start + old_size > entry_start + entry_size:
+        return None
+    payload = data[box_start + 12 : box_start + old_size]
+    if _descriptors_have_tag(payload, 0, len(payload), 0x05):
+        return None
+    delta = len(HE_AAC_ESDS) - old_size
+    buf = bytearray(data)
+    buf[box_start : box_start + old_size] = HE_AAC_ESDS
+    buf[entry_start : entry_start + 4] = (entry_size + delta).to_bytes(4, "big")
+    _bump_containers(buf, box_start, delta)
+    replaced = box_start + old_size
+    prefix = bytes(buf[: box_start + len(HE_AAC_ESDS)])
+    return prefix, replaced
+
+
+def _with_audio_patch(ordered, audio_patch):
+    if not audio_patch or not ordered:
+        return ordered
+    prefix, replaced = audio_patch
+    first = ordered[0]
+    first_size = chunk_size(first)
+    if first_size is None or replaced < 0 or replaced > first_size or len(prefix) < replaced:
+        return ordered
+    virtual = [{"index": -1, "inline": prefix, "size": len(prefix)}]
+    tail_size = first_size - replaced
+    if tail_size:
+        tail = dict(first)
+        tail["size"] = tail_size
+        tail["byte_offset"] = replaced
+        virtual.append(tail)
+    virtual.extend(ordered[1:])
+    return virtual
+
+
+def media_plan(chunks, range_header, audio_patch=None):
     ordered = sorted(chunks, key=lambda item: item.get("index") or 0)
     sizes = [chunk_size(chunk) for chunk in ordered]
     if any(size is None for size in sizes):
         return {"status": 200, "headers": {}, "slices": None}
+    ordered = _with_audio_patch(ordered, audio_patch)
+    sizes = [chunk_size(chunk) for chunk in ordered]
     total = sum(sizes)
     if total <= 0:
         return {"status": 200, "headers": {"Content-Length": "0", "Accept-Ranges": "bytes"}, "slices": []}
@@ -247,19 +384,28 @@ class DiscordFiles(object):
     def stream_slices(self, slices, mapping):
         def generate():
             for chunk, local_start, local_end in slices:
-                url = mapping.get(chunk.get("url")) or chunk.get("url")
-                size = chunk_size(chunk) or 0
                 count = local_end - local_start + 1
-                if count <= 0 or not url:
+                if count <= 0:
                     continue
+                inline = chunk.get("inline")
+                if inline is not None:
+                    yield bytes(inline[local_start : local_end + 1])
+                    continue
+                url = mapping.get(chunk.get("url")) or chunk.get("url")
+                if not url:
+                    continue
+                offset = int(chunk.get("byte_offset") or 0)
+                size = (chunk_size(chunk) or 0) + offset
+                real_start = local_start + offset
+                real_end = local_end + offset
                 headers = {}
-                partial = local_start > 0 or local_end < size - 1
+                partial = real_start > 0 or real_end < size - 1
                 if partial:
-                    headers["Range"] = "bytes=%s-%s" % (local_start, local_end)
+                    headers["Range"] = "bytes=%s-%s" % (real_start, real_end)
                 response = requests.get(url, headers=headers, stream=True, timeout=60)
                 try:
                     response.raise_for_status()
-                    skip = local_start if partial and response.status_code == 200 else 0
+                    skip = real_start if partial and response.status_code == 200 else 0
                     for piece in take_bytes(response.iter_content(256 * 1024), count, skip):
                         yield piece
                 finally:

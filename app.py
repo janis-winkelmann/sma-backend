@@ -5,7 +5,15 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 from db import Database
-from media import DiscordFiles, content_type, live_is_recording, media_plan, replace_urls
+from media import (
+    DiscordFiles,
+    audio_header_patch,
+    content_type,
+    live_is_recording,
+    media_plan,
+    moov_end,
+    replace_urls,
+)
 
 app = Flask(__name__)
 
@@ -157,6 +165,15 @@ def lookup_payload(user, posts, added, username, total=None, counts=None, locked
     }
 
 
+def media_url(post_id, kind, chunks, locked):
+    if locked or not chunks or kind == "images":
+        return None
+    # Chunk count changes as a live grows, so a refresh does not reuse a shorter cached file.
+    if kind == "live":
+        return "/api/media/%s?n=%s" % (post_id, len(chunks))
+    return "/api/media/%s" % post_id
+
+
 def present_post(row, locked=False):
     deleted = bool(row.get("is_deleted"))
     when = format_when(row.get("posted_at"))
@@ -185,7 +202,7 @@ def present_post(row, locked=False):
         "status": "Deleted" if deleted else "Archived",
         "type": kind,
         "locked": bool(locked),
-        "mediaUrl": None if locked else ("/api/media/%s" % post_id if chunks and kind != "images" else None),
+        "mediaUrl": media_url(post_id, kind, chunks, locked),
         "thumbnailUrl": "/api/thumb/%s" % post_id if row.get("thumbnail") else None,
         "imageUrls": image_urls,
         "imageCount": len(image_urls),
@@ -318,6 +335,50 @@ def one_post(username, post_id):
     return jsonify(payload)
 
 
+_AUDIO_PATCHES = {}
+
+
+def fetch_moov(url):
+    need = 64 * 1024
+    blob = b""
+    for _ in range(3):
+        response = requests.get(url, headers={"Range": "bytes=0-%s" % (need - 1)}, timeout=30)
+        response.raise_for_status()
+        blob = response.content or b""
+        end = moov_end(blob)
+        if end is None:
+            return None
+        if len(blob) >= end and blob[4:8] == b"ftyp":
+            ftyp = int.from_bytes(blob[:4], "big")
+            if len(blob) >= ftyp + 8 and blob[ftyp + 4 : ftyp + 8] == b"moov":
+                return blob[:end]
+        need = max(end, need * 2)
+    return None
+
+
+def audio_patch_for(files, post_id, chunks):
+    ordered = sorted(chunks, key=lambda item: item.get("index") or 0)
+    first = ordered[0] if ordered else None
+    if not first or not first.get("url"):
+        return None
+    key = (str(post_id), str(first.get("filename") or ""), int(first.get("size") or 0))
+    if key in _AUDIO_PATCHES:
+        return _AUDIO_PATCHES[key]
+    try:
+        mapping, _updates = files.prepare([first.get("url")])
+        header = fetch_moov(mapping.get(first.get("url")) or first.get("url"))
+    except requests.RequestException:
+        app.logger.exception("live audio header for %s", post_id)
+        return None
+    if not header:
+        return None
+    patch = audio_header_patch(header)
+    _AUDIO_PATCHES[key] = patch
+    if patch:
+        app.logger.info("restored live audio config for %s", post_id)
+    return patch
+
+
 @app.get("/api/media/<post_id>")
 def media(post_id):
     store = database()
@@ -330,7 +391,10 @@ def media(post_id):
     chunks = (row or {}).get("chunks") or []
     if not chunks:
         return jsonify({"error": "No file stored for this post."}), 404
-    plan = media_plan(chunks, request.headers.get("Range"))
+    patch = None
+    if (row or {}).get("type") == "live":
+        patch = audio_patch_for(files, post_id, chunks)
+    plan = media_plan(chunks, request.headers.get("Range"), patch)
     headers = dict(plan["headers"])
     if row.get("type") == "live" and live_is_recording(chunks):
         headers["Cache-Control"] = "no-store"
