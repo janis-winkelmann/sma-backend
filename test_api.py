@@ -1,7 +1,7 @@
 import unittest
 
 from app import app, lookup_payload, present_post
-from media import content_type, media_plan, take_bytes
+from media import content_type, link_is_live, media_plan, replace_urls, take_bytes
 
 
 class ApiTest(unittest.TestCase):
@@ -103,6 +103,24 @@ class ApiTest(unittest.TestCase):
 
         self.assertEqual(media_plan(chunks, "bytes=500-")["status"], 416)
         self.assertIsNone(media_plan([{"index": 0, "url": "https://cdn.example/a"}], None)["slices"])
+
+    def test_a_live_link_is_kept_and_an_expired_one_is_replaced(self):
+        now = 1_700_000_000
+        live = "https://cdn.discordapp.com/attachments/1/2/file.mp4?ex=%x&is=aa&hm=bb" % (now + 500)
+        expired = "https://cdn.discordapp.com/attachments/1/2/old.mp4?ex=%x&is=aa&hm=bb" % (now - 10)
+        unsigned = "https://cdn.discordapp.com/attachments/1/2/plain.mp4"
+        self.assertTrue(link_is_live(live, now=now))
+        self.assertFalse(link_is_live(expired, now=now))
+        self.assertFalse(link_is_live(unsigned, now=now))
+        self.assertFalse(link_is_live(live, now=now + 400))
+        refreshed = "https://cdn.discordapp.com/attachments/1/2/old.mp4?ex=%x&is=cc&hm=dd" % (now + 80000)
+        rewritten = replace_urls(
+            [{"index": 0, "url": expired, "size": 3}, {"index": 1, "url": live, "size": 4}],
+            {expired: refreshed},
+        )
+        self.assertEqual(rewritten[0]["url"], refreshed)
+        self.assertEqual(rewritten[1]["url"], live)
+        self.assertIsNone(replace_urls([{"url": live}], {}))
 
     def test_take_bytes_skips_a_prefix(self):
         pieces = [b"abcdef", b"ghijkl"]

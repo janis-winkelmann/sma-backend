@@ -122,6 +122,26 @@ class Database(object):
         rows = response.json()
         return rows[0] if rows else None
 
+    def patch_post(self, post_id, fields):
+        response = self.session.patch(
+            self.base + "/tiktok_posts",
+            params={"post_id": "eq.%s" % post_id},
+            headers={"Prefer": "return=minimal"},
+            json=fields,
+            timeout=30,
+        )
+        response.raise_for_status()
+
+    def patch_user(self, username, fields):
+        response = self.session.patch(
+            self.base + "/tiktok_users",
+            params={"username": "eq.%s" % username},
+            headers={"Prefer": "return=minimal"},
+            json=fields,
+            timeout=30,
+        )
+        response.raise_for_status()
+
 
 def empty_counts():
     return {

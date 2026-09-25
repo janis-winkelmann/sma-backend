@@ -5,7 +5,7 @@ import requests
 from flask import Flask, Response, jsonify, request
 
 from db import Database
-from media import DiscordFiles, content_type, media_plan
+from media import DiscordFiles, content_type, media_plan, replace_urls
 
 app = Flask(__name__)
 
@@ -18,6 +18,14 @@ def database():
     if not url or not key:
         return None
     return Database(url, key)
+
+
+def remember_link(files, stored, save):
+    mapping, updates = files.prepare([stored])
+    fresh = updates.get(stored)
+    if fresh:
+        save(fresh)
+    return mapping.get(stored) or stored
 
 
 def discord_files():
@@ -268,10 +276,22 @@ def media(post_id):
     headers["Cache-Control"] = "private, max-age=3600"
     if plan["status"] == 416:
         return Response(status=416, headers=headers)
+    if plan["slices"] is None:
+        urls = [chunk.get("url") for chunk in chunks]
+    else:
+        urls = [chunk.get("url") for chunk, _start, _end in plan["slices"]]
+    mapping, updates = files.prepare(urls)
+    rewritten = replace_urls(chunks, updates)
+    if rewritten is not None:
+        store.patch_post(post_id, {"chunks": rewritten})
     mime = content_type(row.get("type"), chunks)
     if plan["slices"] is None:
-        return Response(files.stream(chunks), mimetype=mime, headers=headers)
-    return Response(files.stream_slices(plan["slices"]), status=plan["status"], mimetype=mime, headers=headers)
+        body = files.stream(chunks, mapping)
+        status = 200
+    else:
+        body = files.stream_slices(plan["slices"], mapping)
+        status = plan["status"]
+    return Response(body, status=status, mimetype=mime, headers=headers)
 
 
 @app.get("/api/slide/<post_id>/<int:index>")
@@ -294,8 +314,7 @@ def slide(post_id, index):
     stored = (match or {}).get("url")
     if not stored:
         return jsonify({"error": "No slide stored for this post."}), 404
-    fresh = files.refresh([stored])
-    url = fresh.get(stored) or stored
+    url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"slides": replace_urls(slides, {stored: fresh})}))
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
     return Response(
@@ -314,8 +333,7 @@ def thumb(post_id):
     stored = (row or {}).get("thumbnail")
     if not stored:
         return jsonify({"error": "No thumbnail stored for this post."}), 404
-    fresh = files.refresh([stored])
-    url = fresh.get(stored) or stored
+    url = remember_link(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
     return Response(
@@ -333,8 +351,11 @@ def pfp(username):
     user = store.get_user(clean_username(username))
     if not user or not user.get("pfp"):
         return jsonify({"error": "No profile image stored."}), 404
-    fresh = files.refresh([user["pfp"]])
-    url = fresh.get(user["pfp"]) or user["pfp"]
+    url = remember_link(
+        files,
+        user["pfp"],
+        lambda fresh: store.patch_user(clean_username(username), {"pfp": fresh}),
+    )
     upstream = requests.get(url, stream=True, timeout=30)
     upstream.raise_for_status()
     return Response(upstream.iter_content(256 * 1024), mimetype=upstream.headers.get("Content-Type", "image/jpeg"))

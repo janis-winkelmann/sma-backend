@@ -1,7 +1,50 @@
+from datetime import datetime, timezone
+from urllib.parse import parse_qs, urlparse
+
 import requests
 
 API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/janis-winkelmann/sma-backend, 1.0)"
+EXPIRY_LEEWAY = 120
+
+
+def link_expiry(url):
+    if not url:
+        return None
+    raw = (parse_qs(urlparse(url).query).get("ex") or [None])[0]
+    if not raw:
+        return None
+    try:
+        return int(raw, 16)
+    except ValueError:
+        return None
+
+
+def link_is_live(url, now=None):
+    expiry = link_expiry(url)
+    if expiry is None:
+        return False
+    if now is None:
+        now = datetime.now(timezone.utc).timestamp()
+    return expiry > now + EXPIRY_LEEWAY
+
+
+def replace_urls(items, updates):
+    if not updates:
+        return None
+    changed = False
+    result = []
+    for item in items:
+        url = item.get("url") if isinstance(item, dict) else None
+        new = updates.get(url)
+        if new and new != url:
+            copied = dict(item)
+            copied["url"] = new
+            result.append(copied)
+            changed = True
+        else:
+            result.append(item)
+    return result if changed else None
 
 
 def chunk_size(chunk):
@@ -138,13 +181,34 @@ class DiscordFiles(object):
             fresh[item["original"]] = item["refreshed"]
         return fresh
 
-    def stream(self, chunks):
+    def prepare(self, urls):
+        mapping = {}
+        stale = []
+        seen = set()
+        for url in urls:
+            if not url or url in seen:
+                continue
+            seen.add(url)
+            if link_is_live(url):
+                mapping[url] = url
+            else:
+                stale.append(url)
+        updates = {}
+        if stale:
+            refreshed = self.refresh(stale)
+            for url in stale:
+                new = refreshed.get(url) or url
+                mapping[url] = new
+                if new != url:
+                    updates[url] = new
+        return mapping, updates
+
+    def stream(self, chunks, mapping):
         ordered = sorted(chunks, key=lambda chunk: chunk.get("index") or 0)
-        fresh = self.refresh([chunk["url"] for chunk in ordered if chunk.get("url")])
 
         def generate():
             for chunk in ordered:
-                url = fresh.get(chunk["url"]) or chunk["url"]
+                url = mapping.get(chunk.get("url")) or chunk.get("url")
                 response = requests.get(url, stream=True, timeout=60)
                 response.raise_for_status()
                 for piece in response.iter_content(256 * 1024):
@@ -153,13 +217,10 @@ class DiscordFiles(object):
 
         return generate()
 
-    def stream_slices(self, slices):
-        urls = [chunk["url"] for chunk, _start, _end in slices if chunk.get("url")]
-        fresh = self.refresh(urls) if urls else {}
-
+    def stream_slices(self, slices, mapping):
         def generate():
             for chunk, local_start, local_end in slices:
-                url = fresh.get(chunk.get("url")) or chunk.get("url")
+                url = mapping.get(chunk.get("url")) or chunk.get("url")
                 size = chunk_size(chunk) or 0
                 count = local_end - local_start + 1
                 if count <= 0 or not url:
