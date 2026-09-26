@@ -22,7 +22,7 @@ def _shared_pool():
         return _POOL
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=0, pool_block=True)
+            _POOL = HTTPAdapter(pool_connections=8, pool_maxsize=40, max_retries=0, pool_block=True)
         return _POOL
 
 
