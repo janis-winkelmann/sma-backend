@@ -765,7 +765,7 @@ def run_publish(path):
                     pass
             except OSError:
                 pass
-        raise
+        sys.exit(1)
     finally:
         try:
             if path and os.path.isfile(path):

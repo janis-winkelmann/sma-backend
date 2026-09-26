@@ -442,14 +442,23 @@ class DiscordFiles(object):
 
     def upload(self, channel_id, filename, data, content_type="video/mp4"):
         response = None
-        for attempt in range(5):
-            response = self.session.post(
-                "%s/channels/%s/messages" % (API, channel_id),
-                data={"payload_json": json.dumps({"content": filename})},
-                files={"files[0]": (filename, data, content_type)},
-                timeout=180,
-            )
-            if response.status_code != 429 or attempt == 4:
+        last = "error"
+        for attempt in range(6):
+            try:
+                response = self.session.post(
+                    "%s/channels/%s/messages" % (API, channel_id),
+                    data={"payload_json": json.dumps({"content": filename})},
+                    files={"files[0]": (filename, data, content_type)},
+                    timeout=180,
+                )
+            except requests.RequestException as exc:
+                response = None
+                last = type(exc).__name__
+                if attempt == 5:
+                    break
+                time.sleep(1 + attempt)
+                continue
+            if response.status_code != 429 or attempt == 5:
                 break
             try:
                 wait = min(max(float(response.headers.get("Retry-After")), 0.5), 30)
@@ -458,7 +467,7 @@ class DiscordFiles(object):
             time.sleep(wait)
         if response is None or response.status_code >= 400:
             status = getattr(response, "status_code", None)
-            raise requests.RequestException("upload failed (%s)" % (status or "error"))
+            raise requests.RequestException("upload failed (%s)" % (status or last))
         message = response.json()
         attachment = (message.get("attachments") or [None])[0] or {}
         url = attachment.get("url")
