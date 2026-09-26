@@ -318,6 +318,8 @@ class ApiTest(unittest.TestCase):
             {expired: refreshed},
         )
         self.assertEqual(rewritten[0]["url"], refreshed)
+        self.assertEqual(rewritten[1]["url"], live)
+        self.assertIsNone(replace_urls([{"url": live}], {}))
 
     def test_failed_refresh_keeps_the_stored_link(self):
         files = DiscordFiles("token")
@@ -330,9 +332,6 @@ class ApiTest(unittest.TestCase):
         mapping, updates = files.prepare([stored])
         self.assertEqual(mapping[stored], stored)
         self.assertEqual(updates, {})
-
-        self.assertEqual(rewritten[1]["url"], live)
-        self.assertIsNone(replace_urls([{"url": live}], {}))
 
     def test_a_recording_live_changes_its_media_url_as_chunks_arrive(self):
         recent = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
