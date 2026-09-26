@@ -3,11 +3,13 @@ import hashlib
 import json
 import logging
 import os
+import shutil
 import subprocess
 import sys
 import threading
 import time
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 
 import requests
 
@@ -16,7 +18,8 @@ log = logging.getLogger("playback")
 CACHE_ROOT = os.environ.get("SMA_LIVE_CACHE", "/var/cache/sma-live")
 DEFAULT_WAIT = float(os.environ.get("SMA_LIVE_REMUX_WAIT", "20"))
 FAIL_COOLDOWN = 20
-KEEP_FILES = 3
+KEEP_FILES = 1
+PLAY_CHUNK = 8 * 1024 * 1024
 FRAGMENTED_BRANDS = (b"iso5", b"iso6", b"dash", b"msdh")
 
 
@@ -195,7 +198,8 @@ def cached_choice(directory, signature):
 
 def _pid_alive(pidfile):
     try:
-        pid = int(open(pidfile).read().strip())
+        with open(pidfile) as handle:
+            pid = int(handle.read().strip())
     except (OSError, ValueError):
         return False
     if pid <= 0:
@@ -476,7 +480,7 @@ def _fresh_pins(directory, max_age):
 
 
 def _prune(directory, keep):
-    # Keep the newest files and any file a player requested in the last 20 minutes.
+    # Keep the file a player is watching and one newer remux. Older copies are deleted.
     fresh = _fresh_pins(directory, 20 * 60)
     files = []
     try:
@@ -573,7 +577,204 @@ def run_job(path):
                 pass
         _cleanup_partials(directory)
         try:
-            current = int(open(pidfile).read().strip())
+            with open(pidfile) as handle:
+                current = int(handle.read().strip())
+        except (OSError, ValueError):
+            current = None
+        if current == os.getpid():
+            try:
+                os.remove(pidfile)
+            except OSError:
+                pass
+
+
+def discard_live_cache(post_id):
+    """Remove a finished live from this server. Playback continues from Discord."""
+    directory = os.path.join(CACHE_ROOT, safe_post_id(post_id))
+    if not os.path.isdir(directory) or not _inside_cache(directory):
+        return
+    if _any_running(directory):
+        return
+    shutil.rmtree(directory, ignore_errors=True)
+
+
+def build_playable_chunks(path, post_id, upload, now=None, piece_size=PLAY_CHUNK):
+    """Split a finished remux into Discord-sized pieces."""
+    moment = now or datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    chunks = []
+    with open(path, "rb") as handle:
+        index = 0
+        while True:
+            blob = handle.read(piece_size)
+            if not blob:
+                break
+            filename = "%s.play.part%05d" % (safe_post_id(post_id), index)
+            stored = dict(upload(filename, blob))
+            stored["index"] = index
+            stored["playable"] = True
+            stored["closed"] = True
+            stored["size"] = len(blob)
+            stored["uploaded_at"] = moment
+            chunks.append(stored)
+            index += 1
+    if not chunks:
+        raise RuntimeError("empty live")
+    return chunks
+
+
+def _old_messages(chunks):
+    messages = []
+    seen = set()
+    for chunk in chunks or []:
+        if not isinstance(chunk, dict) or chunk.get("playable"):
+            continue
+        channel_id = str(chunk.get("channel_id") or "")
+        message_id = str(chunk.get("message_id") or "")
+        if not channel_id or not message_id or message_id in seen:
+            continue
+        seen.add(message_id)
+        messages.append({"channel_id": channel_id, "message_id": message_id})
+    return messages
+
+
+def schedule_publish(post_id, source, chunks):
+    """Copy a finished remux to Discord, then the request path deletes the server file."""
+    if not source or not _playable_output(source) or not _inside_cache(source):
+        return
+    directory = os.path.dirname(os.path.realpath(source))
+    signature = os.path.splitext(os.path.basename(source))[0]
+    pidfile = os.path.join(directory, signature + ".publish.pid")
+    failed = os.path.join(directory, signature + ".publish.failed")
+    if _pid_alive(pidfile) or _any_running(directory) or _recently_failed(failed):
+        return
+    lock_path = os.path.join(directory, "build.lock")
+    try:
+        lock = open(lock_path, "a+")
+    except OSError:
+        log.exception("live publish lock")
+        return
+    with lock:
+        fcntl.flock(lock, fcntl.LOCK_EX)
+        if _pid_alive(pidfile) or _any_running(directory) or _recently_failed(failed):
+            return
+        channel_id = ""
+        for chunk in chunks or []:
+            if isinstance(chunk, dict) and chunk.get("channel_id"):
+                channel_id = str(chunk["channel_id"])
+                break
+        job = {
+            "post_id": str(post_id),
+            "source": os.path.realpath(source),
+            "directory": directory,
+            "channel_id": channel_id,
+            "old": _old_messages(chunks),
+            "pidfile": pidfile,
+            "failed": failed,
+        }
+        job_path = os.path.join(directory, signature + ".publish.json")
+        descriptor = os.open(job_path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(descriptor, "w") as handle:
+            json.dump(job, handle)
+        log_path = os.path.join(directory, signature + ".publish.log")
+        log_handle = os.fdopen(os.open(log_path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600), "ab")
+        try:
+            proc = subprocess.Popen(
+                [sys.executable, "-c", "import sys, playback; playback.run_publish(sys.argv[1])", job_path],
+                cwd=os.path.dirname(os.path.abspath(__file__)),
+                start_new_session=True,
+                stdin=subprocess.DEVNULL,
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+                close_fds=True,
+            )
+        except OSError:
+            log.exception("live publish failed to start")
+            log_handle.close()
+            try:
+                os.remove(job_path)
+            except OSError:
+                pass
+            return
+        with open(pidfile, "w") as handle:
+            handle.write(str(proc.pid))
+        log_handle.close()
+        threading.Thread(target=proc.wait, daemon=True).start()
+        log.info("publishing finished live %s", post_id)
+
+
+def publish_exact(post_id, chunks):
+    exact = os.path.join(CACHE_ROOT, safe_post_id(post_id), live_signature(post_id, chunks) + ".mp4")
+    schedule_publish(post_id, exact, chunks)
+
+
+def run_publish(path):
+    logging.basicConfig(level=logging.INFO)
+    from db import Database
+    from media import DiscordFiles
+
+    with open(path) as handle:
+        job = json.load(handle)
+    pidfile = job["pidfile"]
+    source = job["source"]
+    with open(pidfile, "w") as handle:
+        handle.write(str(os.getpid()))
+    uploaded = []
+    files = None
+    saved = False
+    try:
+        token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
+        channel_id = os.environ.get("DISCORD_CHANNEL_ID", "").strip() or job.get("channel_id") or ""
+        supabase_url = os.environ.get("SUPABASE_URL", "").strip()
+        supabase_key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+        if not token or not channel_id or not supabase_url or not supabase_key:
+            raise RuntimeError("storage is not configured")
+        if not _playable_output(source):
+            raise RuntimeError("remux is not playable")
+        files = DiscordFiles(token)
+
+        def upload(filename, blob):
+            if uploaded:
+                time.sleep(0.35)
+            stored = files.upload(channel_id, filename, blob)
+            uploaded.append(stored)
+            return stored
+
+        chunks = build_playable_chunks(source, job["post_id"], upload)
+        Database(supabase_url, supabase_key).patch_post(job["post_id"], {"chunks": chunks})
+        saved = True
+        directory = job.get("directory")
+        if directory and _inside_cache(directory):
+            shutil.rmtree(directory, ignore_errors=True)
+        for message in job.get("old") or []:
+            try:
+                files.delete_message(message["channel_id"], message["message_id"])
+            except Exception:
+                log.warning("old live chunk delete failed")
+        log.info("published finished live %s parts=%s", job["post_id"], len(chunks))
+    except Exception as exc:
+        print("publish failed: %s" % type(exc).__name__, flush=True)
+        if not saved and files is not None:
+            for stored in uploaded:
+                try:
+                    files.delete_message(stored.get("channel_id"), stored.get("message_id"))
+                except Exception:
+                    pass
+        if not saved:
+            try:
+                with open(job["failed"], "a"):
+                    pass
+            except OSError:
+                pass
+        raise
+    finally:
+        try:
+            if path and os.path.isfile(path):
+                os.remove(path)
+        except OSError:
+            pass
+        try:
+            with open(pidfile) as handle:
+                current = int(handle.read().strip())
         except (OSError, ValueError):
             current = None
         if current == os.getpid():

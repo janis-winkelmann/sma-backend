@@ -1,3 +1,4 @@
+import json
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
@@ -398,6 +399,12 @@ def live_is_recording(chunks, now=None):
     return moment - latest < timedelta(minutes=6)
 
 
+def chunks_are_playable(chunks):
+    """A finished live that has already been stored on Discord as a normal MP4."""
+    usable = [chunk for chunk in (chunks or []) if isinstance(chunk, dict)]
+    return bool(usable) and all(chunk.get("playable") for chunk in usable)
+
+
 def content_type(post_type, chunks):
     name = ""
     if chunks:
@@ -432,6 +439,47 @@ class DiscordFiles(object):
         for item in response.json().get("refreshed_urls", []):
             fresh[item["original"]] = item["refreshed"]
         return fresh
+
+    def upload(self, channel_id, filename, data, content_type="video/mp4"):
+        response = None
+        for attempt in range(5):
+            response = self.session.post(
+                "%s/channels/%s/messages" % (API, channel_id),
+                data={"payload_json": json.dumps({"content": filename})},
+                files={"files[0]": (filename, data, content_type)},
+                timeout=180,
+            )
+            if response.status_code != 429 or attempt == 4:
+                break
+            try:
+                wait = min(max(float(response.headers.get("Retry-After")), 0.5), 30)
+            except (TypeError, ValueError):
+                wait = 2
+            time.sleep(wait)
+        if response is None or response.status_code >= 400:
+            status = getattr(response, "status_code", None)
+            raise requests.RequestException("upload failed (%s)" % (status or "error"))
+        message = response.json()
+        attachment = (message.get("attachments") or [None])[0] or {}
+        url = attachment.get("url")
+        if not url or not message.get("id"):
+            raise requests.RequestException("upload failed (empty)")
+        return {
+            "filename": attachment.get("filename") or filename,
+            "url": url,
+            "channel_id": str(channel_id),
+            "message_id": str(message["id"]),
+            "size": int(attachment.get("size") or len(data)),
+        }
+
+    def delete_message(self, channel_id, message_id):
+        response = self.session.delete(
+            "%s/channels/%s/messages/%s" % (API, channel_id, message_id),
+            timeout=30,
+        )
+        if response.status_code in (200, 204, 404):
+            return
+        raise requests.RequestException("delete failed (%s)" % response.status_code)
 
     def prepare(self, urls):
         mapping = {}

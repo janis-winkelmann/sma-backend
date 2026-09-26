@@ -10,6 +10,7 @@ from app import IMAGE_CACHE, app, free_visible_filter, lookup_payload, post_is_l
 from db import Database
 from media import (
     audio_header_patch,
+    chunks_are_playable,
     content_type,
     file_plan,
     iter_file,
@@ -21,7 +22,15 @@ from media import (
     replace_urls,
     take_bytes,
 )
-from playback import assemble_source, cached_choice, ffmpeg_remux_args, live_should_remux, live_signature
+from playback import (
+    assemble_source,
+    build_playable_chunks,
+    cached_choice,
+    discard_live_cache,
+    ffmpeg_remux_args,
+    live_should_remux,
+    live_signature,
+)
 import playback
 import tempfile
 import shutil
@@ -412,6 +421,57 @@ class ApiTest(unittest.TestCase):
         finally:
             playback.CACHE_ROOT = previous
             shutil.rmtree(root)
+
+    def test_a_finished_live_is_split_for_discord_and_removed_from_disk(self):
+        self.assertFalse(chunks_are_playable([{"index": 0, "url": "https://cdn.example/a"}]))
+        self.assertTrue(chunks_are_playable([{"index": 0, "playable": True}, {"index": 1, "playable": True}]))
+        directory = tempfile.mkdtemp()
+        path = os.path.join(directory, "live.mp4")
+        original = b"0123456789abcdef"
+        with open(path, "wb") as handle:
+            handle.write(original)
+        saved = []
+
+        def upload(filename, blob):
+            saved.append((filename, blob))
+            return {"filename": filename, "url": "https://cdn.example/%s" % filename, "channel_id": "9", "message_id": str(len(saved))}
+
+        chunks = build_playable_chunks(path, "post 1", upload, now="2026-09-26T00:00:00Z", piece_size=6)
+        self.assertEqual(b"".join(blob for _name, blob in saved), original)
+        self.assertEqual([chunk["index"] for chunk in chunks], [0, 1, 2])
+        self.assertTrue(all(chunk["playable"] and chunk["closed"] for chunk in chunks))
+        self.assertEqual(chunks[0]["filename"], "post1.play.part00000")
+        self.assertEqual(sum(chunk["size"] for chunk in chunks), len(original))
+        self.assertEqual(
+            playback._old_messages(
+                [
+                    {"channel_id": "9", "message_id": "1"},
+                    {"channel_id": "9", "message_id": "1"},
+                    {"channel_id": "9", "message_id": "2", "playable": True},
+                ]
+            ),
+            [{"channel_id": "9", "message_id": "1"}],
+        )
+        root = tempfile.mkdtemp()
+        previous = playback.CACHE_ROOT
+        playback.CACHE_ROOT = root
+        try:
+            kept = os.path.join(root, "post1")
+            os.makedirs(kept)
+            with open(os.path.join(kept, "clip.mp4"), "wb") as handle:
+                handle.write(b"video")
+            discard_live_cache("post 1")
+            self.assertFalse(os.path.exists(kept))
+            running = os.path.join(root, "busy")
+            os.makedirs(running)
+            with open(os.path.join(running, "job.pid"), "w") as handle:
+                handle.write(str(os.getpid()))
+            discard_live_cache("busy")
+            self.assertTrue(os.path.isdir(running))
+        finally:
+            playback.CACHE_ROOT = previous
+            shutil.rmtree(root)
+            shutil.rmtree(directory)
 
 
 if __name__ == "__main__":

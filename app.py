@@ -12,13 +12,14 @@ from media import (
     content_type,
     file_plan,
     iter_file,
+    chunks_are_playable,
     live_is_recording,
     media_plan,
     read_image_bytes,
     moov_end,
     replace_urls,
 )
-from playback import ensure_playable, live_should_remux
+from playback import discard_live_cache, ensure_playable, live_should_remux, publish_exact
 
 app = Flask(__name__)
 
@@ -481,18 +482,26 @@ def media(post_id):
         return jsonify({"error": "No file stored for this post."}), 404
     patch = None
     if (row or {}).get("type") == "live":
-        patch, brand = audio_patch_for(files, post_id, chunks)
-        if live_should_remux(patch, brand) or not brand:
-            playable = ensure_playable(
-                post_id,
-                chunks,
-                files,
-                patch,
-                remember=lambda updates: _remember_chunks(store, post_id, chunks, updates),
-            )
-            if playable:
-                app.logger.info("serving remuxed live %s", post_id)
-                return _playable_response(playable, request.headers.get("Range"), live_is_recording(chunks))
+        recording = live_is_recording(chunks)
+        if chunks_are_playable(chunks):
+            discard_live_cache(post_id)
+        else:
+            patch, brand = audio_patch_for(files, post_id, chunks)
+            if live_should_remux(patch, brand) or not brand:
+                playable = ensure_playable(
+                    post_id,
+                    chunks,
+                    files,
+                    patch,
+                    remember=lambda updates: _remember_chunks(store, post_id, chunks, updates),
+                )
+                if not recording:
+                    publish_exact(post_id, chunks)
+                if playable:
+                    app.logger.info("serving remuxed live %s", post_id)
+                    return _playable_response(playable, request.headers.get("Range"), recording)
+            elif not recording:
+                discard_live_cache(post_id)
     plan = media_plan(chunks, request.headers.get("Range"), patch)
     headers = dict(plan["headers"])
     if row.get("type") == "live" and live_is_recording(chunks):
