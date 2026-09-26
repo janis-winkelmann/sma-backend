@@ -447,16 +447,24 @@ class DiscordFiles(object):
         self.session.headers["User-Agent"] = USER_AGENT
 
     def refresh(self, urls):
-        response = self.session.post(
-            API + "/attachments/refresh-urls",
-            json={"attachment_urls": urls},
-            timeout=30,
-        )
-        response.raise_for_status()
-        fresh = {}
-        for item in response.json().get("refreshed_urls", []):
-            fresh[item["original"]] = item["refreshed"]
-        return fresh
+        last = None
+        for attempt in range(2):
+            try:
+                response = self.session.post(
+                    API + "/attachments/refresh-urls",
+                    json={"attachment_urls": urls},
+                    timeout=(3, 5),
+                )
+                response.raise_for_status()
+                fresh = {}
+                for item in response.json().get("refreshed_urls", []):
+                    fresh[item["original"]] = item["refreshed"]
+                return fresh
+            except requests.RequestException as exc:
+                last = exc
+                if attempt == 0:
+                    time.sleep(0.3)
+        raise last
 
     def upload(self, channel_id, filename, data, content_type="video/mp4"):
         response = None
@@ -522,7 +530,10 @@ class DiscordFiles(object):
                 stale.append(url)
         updates = {}
         if stale:
-            refreshed = self.refresh(stale)
+            try:
+                refreshed = self.refresh(stale)
+            except requests.RequestException:
+                refreshed = {}
             for url in stale:
                 new = refreshed.get(url) or url
                 mapping[url] = new

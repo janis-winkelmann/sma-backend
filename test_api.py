@@ -19,6 +19,7 @@ from media import (
     looks_like_image,
     media_plan,
     read_image_bytes,
+    DiscordFiles,
     replace_urls,
     take_bytes,
 )
@@ -317,6 +318,19 @@ class ApiTest(unittest.TestCase):
             {expired: refreshed},
         )
         self.assertEqual(rewritten[0]["url"], refreshed)
+
+    def test_failed_refresh_keeps_the_stored_link(self):
+        files = DiscordFiles("token")
+
+        def fail(urls):
+            raise requests.ReadTimeout("timed out")
+
+        files.refresh = fail
+        stored = "https://cdn.discordapp.com/attachments/1/2/clip.mp4"
+        mapping, updates = files.prepare([stored])
+        self.assertEqual(mapping[stored], stored)
+        self.assertEqual(updates, {})
+
         self.assertEqual(rewritten[1]["url"], live)
         self.assertIsNone(replace_urls([{"url": live}], {}))
 
