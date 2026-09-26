@@ -9,13 +9,12 @@ from db import Database
 from media import (
     DiscordFiles,
     audio_header_patch,
-    cached_image_bytes,
     content_type,
     file_plan,
     iter_file,
     live_is_recording,
-    load_cached_image,
     media_plan,
+    read_image_bytes,
     moov_end,
     replace_urls,
 )
@@ -242,17 +241,14 @@ def image_response(data, content_type):
     )
 
 
-def deliver_image(kind, files, stored, save):
-    hit = load_cached_image(kind, stored)
-    if hit:
-        return image_response(*hit)
+def deliver_image(files, stored, save):
     try:
         url = remember_link(files, stored, save)
     except requests.RequestException:
         app.logger.warning("image link refresh failed")
         url = stored
     try:
-        data, content_type = cached_image_bytes(kind, url)
+        data, content_type = read_image_bytes(url)
     except requests.RequestException:
         return None
     return image_response(data, content_type)
@@ -546,7 +542,6 @@ def slide(post_id, index):
     if not stored:
         return jsonify({"error": "No slide stored for this post."}), 404
     image = deliver_image(
-        "slide",
         files,
         stored,
         lambda fresh: store.patch_post(post_id, {"slides": replace_urls(slides, {stored: fresh})}),
@@ -567,7 +562,7 @@ def thumb(post_id):
     stored = (row or {}).get("thumbnail")
     if not stored:
         return jsonify({"error": "No thumbnail stored for this post."}), 404
-    image = deliver_image("thumb", files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
+    image = deliver_image(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
     if image is None:
         app.logger.warning("thumbnail %s unavailable", post_id)
         return jsonify({"error": "Thumbnail is unavailable."}), 502
@@ -584,7 +579,6 @@ def pfp(username):
     if not user or not user.get("pfp"):
         return jsonify({"error": "No profile image stored."}), 404
     image = deliver_image(
-        "pfp",
         files,
         user["pfp"],
         lambda fresh: store.patch_user(clean_username(username), {"pfp": fresh}),

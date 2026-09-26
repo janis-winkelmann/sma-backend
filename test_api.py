@@ -5,13 +5,11 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 import time
-import media
 
 from app import IMAGE_CACHE, app, free_visible_filter, lookup_payload, post_is_locked, present_post
 from db import Database
 from media import (
     audio_header_patch,
-    cached_image_bytes,
     content_type,
     file_plan,
     iter_file,
@@ -327,7 +325,7 @@ class ApiTest(unittest.TestCase):
         self.assertEqual((start, end), (0, 9))
         self.assertEqual(chunk["url"], "https://cdn.example/a")
 
-    def test_a_stalled_thumbnail_is_retried_and_then_served_from_disk(self):
+    def test_a_stalled_thumbnail_is_retried(self):
         jpeg = b"\xff\xd8\xff" + (b"x" * 32)
         self.assertTrue(looks_like_image(jpeg, ""))
         self.assertFalse(looks_like_image(b"not-an-image", "text/html"))
@@ -343,22 +341,6 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(calls["count"], 3)
         self.assertEqual(data, jpeg)
         self.assertEqual(content_type, "image/jpeg")
-
-        root = tempfile.mkdtemp()
-        previous = media.IMAGE_ROOT
-        media.IMAGE_ROOT = root
-        try:
-            first = cached_image_bytes("thumb", "https://cdn.example/attachments/1/2/a.jpg?ex=1", get=lambda _url: (jpeg, "image/jpeg"))
-            self.assertEqual(first[0], jpeg)
-
-            def fail(_url):
-                raise AssertionError("cache hit should not download")
-
-            second = cached_image_bytes("thumb", "https://cdn.example/attachments/1/2/a.jpg?ex=2", get=fail)
-            self.assertEqual(second[0], jpeg)
-        finally:
-            media.IMAGE_ROOT = previous
-            shutil.rmtree(root)
 
     def test_take_bytes_skips_a_prefix(self):
         pieces = [b"abcdef", b"ghijkl"]
