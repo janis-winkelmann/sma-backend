@@ -474,5 +474,69 @@ class ApiTest(unittest.TestCase):
             shutil.rmtree(directory)
 
 
+    def test_thumbnail_batch_returns_several_images_from_one_lookup(self):
+        import app as appmod
+        import base64
+
+        jpeg = b"\xff\xd8\xff" + (b"x" * 16)
+        appmod._THUMB_CACHE.clear()
+        del appmod._THUMB_ORDER[:]
+        appmod._THUMB_INFLIGHT.clear()
+        appmod._THUMB_BYTES = 0
+
+        class Store(object):
+            def __init__(self):
+                self.lookups = 0
+                self.patches = []
+
+            def thumbnails(self, post_ids):
+                self.lookups += 1
+                self.asked = list(post_ids)
+                return {"123456": "https://cdn.example/a.jpg", "654321": "https://cdn.example/gone.jpg"}
+
+            def patch_post(self, post_id, fields):
+                self.patches.append(post_id)
+
+        class Files(object):
+            def prepare(self, urls):
+                return {url: url + "?fresh=1" for url in urls}, {}
+
+        store = Store()
+
+        def fake_read(url, attempts=3):
+            if "gone" in url:
+                raise requests.RequestException("missing")
+            if attempts != 2:
+                raise AssertionError(attempts)
+            return jpeg, "image/jpeg"
+
+        with patch("app.database", return_value=store), patch("app.discord_files", return_value=Files()), patch(
+            "app.read_image_bytes", side_effect=fake_read
+        ):
+            empty = self.client.get("/api/thumbs")
+            self.assertEqual(empty.get_json(), {"thumbs": []})
+            response = self.client.get("/api/thumbs?ids=123456,654321,123456,nope,12")
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(store.lookups, 1)
+        self.assertEqual(store.asked, ["123456", "654321"])
+        self.assertEqual(store.patches, ["123456", "654321"])
+        body = response.get_json()["thumbs"]
+        self.assertEqual(len(body), 1)
+        self.assertEqual(body[0]["id"], "123456")
+        self.assertEqual(body[0]["type"], "image/jpeg")
+        self.assertEqual(base64.b64decode(body[0]["data"]), jpeg)
+        self.assertEqual(response.headers["Cache-Control"], "public, max-age=60")
+
+        with patch("app.database", return_value=store), patch("app.discord_files", return_value=Files()):
+            cached = self.client.get("/api/thumbs?ids=123456")
+        self.assertEqual(store.lookups, 1)
+        self.assertEqual(base64.b64decode(cached.get_json()["thumbs"][0]["data"]), jpeg)
+        self.assertEqual(cached.headers["Cache-Control"], IMAGE_CACHE)
+        appmod._THUMB_CACHE.clear()
+        del appmod._THUMB_ORDER[:]
+        appmod._THUMB_BYTES = 0
+
+
+
 if __name__ == "__main__":
     unittest.main()

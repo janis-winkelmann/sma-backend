@@ -3,6 +3,11 @@ from concurrent.futures import ThreadPoolExecutor
 
 import requests
 
+# A dead handshake used to occupy a worker for the full 30s, which is longer
+# than Cloudflare will wait. Connect failures give up quickly; a healthy query
+# still has room to finish.
+QUERY_TIMEOUT = (3, 8)
+
 
 class Database(object):
     def __init__(self, url, key):
@@ -20,7 +25,7 @@ class Database(object):
         response = self.session.get(
             self.base + "/tiktok_users",
             params={"select": "*", "username": "eq.%s" % username, "limit": "1"},
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
         rows = response.json()
@@ -34,7 +39,7 @@ class Database(object):
             self.base + "/tiktok_users",
             headers={"Prefer": "return=representation"},
             json={"username": username},
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         if response.status_code == 409:
             return self.get_user(username), False
@@ -55,7 +60,7 @@ class Database(object):
                     "limit": str(page_size),
                     "offset": str(offset),
                 },
-                timeout=30,
+                timeout=QUERY_TIMEOUT,
             )
             response.raise_for_status()
             batch = response.json()
@@ -90,7 +95,7 @@ class Database(object):
             self.base + "/tiktok_posts",
             headers={"Prefer": "count=exact"},
             params=params,
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
         rows = response.json()
@@ -139,7 +144,7 @@ class Database(object):
                 "Prefer": "count=exact",
             },
             params=params,
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
             stream=True,
         )
         try:
@@ -147,6 +152,27 @@ class Database(object):
             return content_range_total(response.headers.get("Content-Range"), 0)
         finally:
             response.close()
+
+    def thumbnails(self, post_ids):
+        ids = [post_id for post_id in post_ids if isinstance(post_id, str) and post_id.isdigit()]
+        if not ids:
+            return {}
+        response = self.session.get(
+            self.base + "/tiktok_posts",
+            params={
+                "select": "post_id,thumbnail",
+                "post_id": "in.(%s)" % ",".join(ids),
+            },
+            timeout=QUERY_TIMEOUT,
+        )
+        response.raise_for_status()
+        found = {}
+        for row in response.json():
+            post_id = row.get("post_id")
+            thumbnail = row.get("thumbnail")
+            if post_id and thumbnail:
+                found[post_id] = thumbnail
+        return found
 
     def post(self, post_id):
         response = self.session.get(
@@ -156,7 +182,7 @@ class Database(object):
                 "post_id": "eq.%s" % post_id,
                 "limit": "1",
             },
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
         rows = response.json()
@@ -168,7 +194,7 @@ class Database(object):
             params={"post_id": "eq.%s" % post_id},
             headers={"Prefer": "return=minimal"},
             json=fields,
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
 
@@ -178,7 +204,7 @@ class Database(object):
             params={"username": "eq.%s" % username},
             headers={"Prefer": "return=minimal"},
             json=fields,
-            timeout=30,
+            timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
 

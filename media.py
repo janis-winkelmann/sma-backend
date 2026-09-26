@@ -1,9 +1,11 @@
 import json
+import threading
 import time
 from datetime import datetime, timedelta, timezone
 from urllib.parse import parse_qs, urlparse
 
 import requests
+from requests.adapters import HTTPAdapter
 
 API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/janis-winkelmann/sma-backend, 1.0)"
@@ -52,12 +54,28 @@ def read_image_bytes(url, get=None, attempts=3, pause=None):
             status = getattr(getattr(exc, "response", None), "status_code", None)
             last = str(status or type(exc).__name__)
         if attempt + 1 < attempts:
-            wait(0.25 * (attempt + 1))
+            wait(0.2 * (attempt + 1))
     raise requests.RequestException(last)
 
 
+_cdn_local = threading.local()
+
+
+def _cdn_session():
+    session = getattr(_cdn_local, "session", None)
+    if session is None:
+        session = requests.Session()
+        adapter = HTTPAdapter(pool_connections=8, pool_maxsize=8, max_retries=0)
+        session.mount("https://", adapter)
+        _cdn_local.session = session
+    return session
+
+
 def _download_image(url):
-    response = requests.get(url, timeout=(4, 8))
+    # A hung Discord connection used to sit for 8s before the retry, so a
+    # thumbnail could take 15s and still succeed. Give up on that socket sooner
+    # and reuse the next connection from this thread.
+    response = _cdn_session().get(url, timeout=(2, 3))
     try:
         response.raise_for_status()
         content_type = (response.headers.get("Content-Type") or "image/jpeg").split(";", 1)[0].strip()

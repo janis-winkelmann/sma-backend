@@ -1,9 +1,12 @@
+import base64
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request
+from requests.adapters import HTTPAdapter
 
 from db import Database
 from media import (
@@ -26,12 +29,22 @@ app = Flask(__name__)
 PLATFORMS = [{"id": "tiktok", "label": "TikTok"}]
 
 
+_clients = threading.local()
+
+
 def database():
+    db = getattr(_clients, "db", None)
+    if db is not None:
+        return db
     url = os.environ.get("SUPABASE_URL", "").strip()
     key = os.environ.get("SUPABASE_SERVICE_ROLE_KEY", "").strip()
     if not url or not key:
         return None
-    return Database(url, key)
+    db = Database(url, key)
+    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
+    db.session.mount("https://", adapter)
+    _clients.db = db
+    return db
 
 
 def remember_link(files, stored, save):
@@ -43,10 +56,15 @@ def remember_link(files, stored, save):
 
 
 def discord_files():
+    files = getattr(_clients, "files", None)
+    if files is not None:
+        return files
     token = os.environ.get("DISCORD_BOT_TOKEN", "").strip()
     if not token:
         return None
-    return DiscordFiles(token)
+    files = DiscordFiles(token)
+    _clients.files = files
+    return files
 
 
 def clean_username(value):
@@ -561,21 +579,193 @@ def slide(post_id, index):
     return image
 
 
-@app.get("/api/thumb/<post_id>")
-def thumb(post_id):
+_THUMB_LOCK = threading.Lock()
+_THUMB_CACHE = {}
+_THUMB_ORDER = []
+_THUMB_BYTES = 0
+_THUMB_MAX_BYTES = 8 * 1024 * 1024
+_THUMB_INFLIGHT = {}
+
+
+def _thumb_cached(post_id):
+    with _THUMB_LOCK:
+        hit = _THUMB_CACHE.get(post_id)
+        if not hit:
+            return None
+        _THUMB_ORDER.remove(post_id)
+        _THUMB_ORDER.append(post_id)
+        return hit
+
+
+def _thumb_store(post_id, data, content_type):
+    global _THUMB_BYTES
+    size = len(data)
+    if size <= 0 or size > _THUMB_MAX_BYTES:
+        return
+    with _THUMB_LOCK:
+        previous = _THUMB_CACHE.get(post_id)
+        if previous:
+            _THUMB_BYTES -= len(previous[0])
+            _THUMB_ORDER.remove(post_id)
+        _THUMB_CACHE[post_id] = (data, content_type)
+        _THUMB_ORDER.append(post_id)
+        _THUMB_BYTES += size
+        while _THUMB_ORDER and _THUMB_BYTES > _THUMB_MAX_BYTES:
+            oldest = _THUMB_ORDER.pop(0)
+            dropped = _THUMB_CACHE.pop(oldest, None)
+            if dropped:
+                _THUMB_BYTES -= len(dropped[0])
+
+
+def _load_post_row(store, post_id):
+    try:
+        return store.post(post_id)
+    except requests.RequestException:
+        return store.post(post_id)
+
+
+def _fetch_thumb(post_id):
+    store = database()
+    files = discord_files()
+    if store is None or files is None:
+        return "config", None
+    row = _load_post_row(store, post_id)
+    stored = (row or {}).get("thumbnail")
+    if not stored:
+        return "missing", None
+    image = deliver_image(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
+    if image is None:
+        return "unavailable", None
+    return "ok", (image.get_data(), image.mimetype)
+
+
+def _thumb_ids(raw):
+    ids = []
+    seen = set()
+    for part in (raw or "").split(","):
+        post_id = part.strip()
+        if not post_id.isdigit() or not 6 <= len(post_id) <= 24 or post_id in seen:
+            continue
+        seen.add(post_id)
+        ids.append(post_id)
+        if len(ids) == 24:
+            break
+    return ids
+
+
+def _download_thumbs(store, files, rows):
+    stored = [(post_id, url) for post_id, url in rows.items() if url]
+    try:
+        mapping, _updates = files.prepare([url for _post_id, url in stored])
+    except requests.RequestException:
+        app.logger.warning("image link refresh failed")
+        mapping = {}
+    downloaded = {}
+
+    def load(item):
+        post_id, url = item
+        fresh = mapping.get(url) or url
+        refreshed = fresh if fresh != url else None
+        try:
+            data, content_type = read_image_bytes(fresh, attempts=2)
+        except requests.RequestException:
+            return post_id, refreshed, None
+        return post_id, refreshed, (data, content_type)
+
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        results = list(pool.map(load, stored))
+    for post_id, refreshed, payload in results:
+        if refreshed:
+            try:
+                store.patch_post(post_id, {"thumbnail": refreshed})
+            except requests.RequestException:
+                app.logger.warning("thumbnail %s link was not saved", post_id)
+        if payload:
+            downloaded[post_id] = payload
+    return downloaded
+
+
+@app.get("/api/thumbs")
+def thumbs():
+    ids = _thumb_ids(request.args.get("ids"))
+    if not ids:
+        return jsonify({"thumbs": []})
     store = database()
     files = discord_files()
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
-    row = store.post(post_id)
-    stored = (row or {}).get("thumbnail")
-    if not stored:
+    found = {}
+    needed = []
+    for post_id in ids:
+        cached = _thumb_cached(post_id)
+        if cached:
+            found[post_id] = cached
+        else:
+            needed.append(post_id)
+    if needed:
+        try:
+            rows = store.thumbnails(needed)
+        except requests.RequestException:
+            app.logger.warning("thumbnail batch lookup failed")
+            rows = {}
+        for post_id, payload in _download_thumbs(store, files, rows).items():
+            _thumb_store(post_id, payload[0], payload[1])
+            found[post_id] = payload
+    body = []
+    for post_id in ids:
+        payload = found.get(post_id)
+        if not payload:
+            continue
+        body.append(
+            {
+                "id": post_id,
+                "type": payload[1],
+                "data": base64.b64encode(payload[0]).decode("ascii"),
+            }
+        )
+    response = jsonify({"thumbs": body})
+    response.headers["Cache-Control"] = IMAGE_CACHE if len(body) == len(ids) else "public, max-age=60"
+    return response
+
+
+@app.get("/api/thumb/<post_id>")
+def thumb(post_id):
+    cached = _thumb_cached(post_id)
+    if cached:
+        return image_response(*cached)
+    with _THUMB_LOCK:
+        event = _THUMB_INFLIGHT.get(post_id)
+        if event is None:
+            event = threading.Event()
+            _THUMB_INFLIGHT[post_id] = event
+            leader = True
+        else:
+            leader = False
+    if not leader:
+        event.wait(8)
+        cached = _thumb_cached(post_id)
+        if cached:
+            return image_response(*cached)
+        return jsonify({"error": "Thumbnail is unavailable."}), 502
+    try:
+        status, payload = _fetch_thumb(post_id)
+        if status == "ok" and payload:
+            _thumb_store(post_id, payload[0], payload[1])
+    except requests.RequestException:
+        app.logger.warning("thumbnail %s lookup failed", post_id)
+        status, payload = "unavailable", None
+    finally:
+        event.set()
+        with _THUMB_LOCK:
+            _THUMB_INFLIGHT.pop(post_id, None)
+    if status == "config":
+        return jsonify({"error": "Storage is not configured."}), 503
+    if status == "missing":
         return jsonify({"error": "No thumbnail stored for this post."}), 404
-    image = deliver_image(files, stored, lambda fresh: store.patch_post(post_id, {"thumbnail": fresh}))
-    if image is None:
+    if payload is None:
         app.logger.warning("thumbnail %s unavailable", post_id)
         return jsonify({"error": "Thumbnail is unavailable."}), 502
-    return image
+    return image_response(*payload)
 
 
 @app.get("/api/pfp/<username>")
