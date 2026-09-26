@@ -651,7 +651,7 @@ def _thumb_ids(raw):
             continue
         seen.add(post_id)
         ids.append(post_id)
-        if len(ids) == 24:
+        if len(ids) == 3:
             break
     return ids
 
