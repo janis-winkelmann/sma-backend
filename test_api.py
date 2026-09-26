@@ -98,6 +98,9 @@ class ApiTest(unittest.TestCase):
             def locked_video_count(self, sec_uid, cutoff):
                 return 3
 
+            def is_removed(self, username):
+                return False
+
             def ensure_user(self, username):
                 raise AssertionError("profile lookup must not add an account")
 
@@ -115,6 +118,9 @@ class ApiTest(unittest.TestCase):
 
     def test_profile_is_missing_when_the_account_was_never_added(self):
         class Store(object):
+            def is_removed(self, username):
+                return False
+
             def get_user(self, username):
                 return None
 
@@ -124,6 +130,35 @@ class ApiTest(unittest.TestCase):
         with patch("app.database", return_value=Store()):
             response = self.client.get("/api/profile/nobody")
         self.assertEqual(response.status_code, 404)
+
+
+    def test_a_removed_account_cannot_be_looked_up_or_added(self):
+        class Store(object):
+            def ensure_user(self, username):
+                return None, False
+
+        with patch("app.database", return_value=Store()):
+            response = self.client.get("/api/lookup?user=gone")
+        self.assertEqual(response.status_code, 410)
+        body = response.get_json()
+        self.assertIn("taken down", body["error"])
+        self.assertTrue(body["removed"])
+
+    def test_profile_of_a_removed_account_stays_gone(self):
+        class Store(object):
+            def is_removed(self, username):
+                return True
+
+            def get_user(self, username):
+                raise AssertionError("must not load a taken-down account")
+
+            def ensure_user(self, username):
+                raise AssertionError("must not add a taken-down account")
+
+        with patch("app.database", return_value=Store()):
+            response = self.client.get("/api/profile/gone")
+        self.assertEqual(response.status_code, 410)
+        self.assertTrue(response.get_json()["removed"])
 
     def test_other_platforms_are_rejected(self):
         response = self.client.get("/api/lookup?user=sma&platform=instagram")

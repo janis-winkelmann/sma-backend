@@ -279,6 +279,9 @@ def platforms():
     return jsonify({"platforms": PLATFORMS})
 
 
+REMOVED_MESSAGE = "This account has been taken down following a legal request."
+
+
 @app.get("/api/lookup")
 def lookup():
     platform = request.args.get("platform", "tiktok")
@@ -293,7 +296,7 @@ def lookup():
     try:
         user, added = store.ensure_user(username)
         if not user:
-            return jsonify({"error": "This account was removed from the archive."}), 410
+            return jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410
         premium = viewer_is_premium()
         if added:
             page = {"posts": [], "total": 0}
@@ -322,6 +325,8 @@ def posts():
     premium = viewer_is_premium()
     cutoff = None if premium else free_cutoff()
     try:
+        if store.is_removed(username):
+            return jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410
         user = store.get_user(username)
         if not user:
             return jsonify({"posts": [], "total": 0, "offset": offset, "limit": limit, "lockedVideos": 0})
@@ -360,6 +365,8 @@ def profile(username):
     if store is None:
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
+        if store.is_removed(username):
+            return jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410
         user = store.get_user(username)
         if not user:
             return jsonify({"error": "Account not found."}), 404
@@ -401,7 +408,10 @@ def one_post(username, post_id):
     if store is None:
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
-        user = store.get_user(clean_username(username))
+        clean = clean_username(username)
+        if store.is_removed(clean):
+            return jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410
+        user = store.get_user(clean)
         row = store.post(post_id)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
