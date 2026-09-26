@@ -292,6 +292,8 @@ def lookup():
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
         user, added = store.ensure_user(username)
+        if not user:
+            return jsonify({"error": "This account was removed from the archive."}), 410
         premium = viewer_is_premium()
         if added:
             page = {"posts": [], "total": 0}

@@ -67,7 +67,19 @@ class Database(object):
         rows = response.json()
         return rows[0] if rows else None
 
+    def is_removed(self, username):
+        response = self._send(
+            "get",
+            self.base + "/sma_removed",
+            params={"select": "username", "username": "eq.%s" % username, "limit": "1"},
+            timeout=QUERY_TIMEOUT,
+        )
+        response.raise_for_status()
+        return bool(response.json())
+
     def ensure_user(self, username):
+        if self.is_removed(username):
+            return None, False
         found = self.get_user(username)
         if found:
             return found, False
