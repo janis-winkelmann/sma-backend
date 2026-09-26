@@ -6,8 +6,6 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request
-from requests.adapters import HTTPAdapter
-
 from db import Database
 from media import (
     DiscordFiles,
@@ -41,8 +39,6 @@ def database():
     if not url or not key:
         return None
     db = Database(url, key)
-    adapter = HTTPAdapter(pool_connections=4, pool_maxsize=4, max_retries=0)
-    db.session.mount("https://", adapter)
     _clients.db = db
     return db
 
@@ -339,6 +335,9 @@ def posts():
         locked = 0 if premium else store.locked_video_count(user.get("sec_uid"), cutoff)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    except requests.RequestException:
+        app.logger.warning("posts lookup failed")
+        return jsonify({"error": "Could not load posts."}), 503
     return jsonify(
         {
             "posts": [present_post(row, post_is_locked(row, premium)) for row in page["posts"]],
@@ -492,7 +491,11 @@ def media(post_id):
     files = discord_files()
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
-    row = store.post(post_id)
+    try:
+        row = store.post(post_id)
+    except requests.RequestException:
+        app.logger.warning("video lookup failed")
+        return jsonify({"error": "Could not load this video."}), 503
     if post_is_locked(row, viewer_is_premium()):
         return premium_required(row)
     chunks = (row or {}).get("chunks") or []

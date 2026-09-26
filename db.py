@@ -1,28 +1,64 @@
+import logging
 import os
+import threading
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
+from requests.adapters import HTTPAdapter
 
-# A dead handshake used to occupy a worker for the full 30s, which is longer
-# than Cloudflare will wait. Connect failures give up quickly; a healthy query
-# still has room to finish.
-QUERY_TIMEOUT = (3, 8)
+# Every gunicorn thread used to open its own TLS connection, and the count
+# queries opened yet another. Those handshakes are what timed out. One pool
+# per worker keeps connections warm and lets a lot of queries share them.
+_POOL_LOCK = threading.Lock()
+_POOL = None
+_HTTP = threading.local()
+QUERY_TIMEOUT = (20, 90)
+log = logging.getLogger("sma.db")
+
+
+def _shared_pool():
+    global _POOL
+    if _POOL is not None:
+        return _POOL
+    with _POOL_LOCK:
+        if _POOL is None:
+            _POOL = HTTPAdapter(pool_connections=8, pool_maxsize=16, max_retries=0, pool_block=True)
+        return _POOL
 
 
 class Database(object):
     def __init__(self, url, key):
         self.base = url.rstrip("/") + "/rest/v1"
-        self.session = requests.Session()
-        self.session.headers.update(
-            {
-                "apikey": key,
-                "Authorization": "Bearer " + key,
-                "Content-Type": "application/json",
-            }
-        )
+        self._headers = {
+            "apikey": key,
+            "Authorization": "Bearer " + key,
+            "Content-Type": "application/json",
+        }
+        self.session = self._session()
+
+    def _session(self):
+        session = getattr(_HTTP, "session", None)
+        if session is not None:
+            return session
+        session = requests.Session()
+        session.headers.update(self._headers)
+        session.mount("https://", _shared_pool())
+        _HTTP.session = session
+        return session
+
+    def _send(self, method, url, **kwargs):
+        kwargs.setdefault("timeout", QUERY_TIMEOUT)
+        try:
+            return getattr(self._session(), method)(url, **kwargs)
+        except (requests.Timeout, requests.ConnectionError):
+            # Leave the shared pool alone. This thread just borrows a different connection.
+            log.warning("supabase connection failed; retrying on the shared pool")
+            _HTTP.session = None
+            return getattr(self._session(), method)(url, **kwargs)
 
     def get_user(self, username):
-        response = self.session.get(
+        response = self._send(
+            "get",
             self.base + "/tiktok_users",
             params={"select": "*", "username": "eq.%s" % username, "limit": "1"},
             timeout=QUERY_TIMEOUT,
@@ -35,7 +71,8 @@ class Database(object):
         found = self.get_user(username)
         if found:
             return found, False
-        response = self.session.post(
+        response = self._send(
+            "post",
             self.base + "/tiktok_users",
             headers={"Prefer": "return=representation"},
             json={"username": username},
@@ -52,7 +89,8 @@ class Database(object):
         offset = 0
         page_size = 1000
         while True:
-            response = self.session.get(
+            response = self._send(
+                "get",
                 self.base + "/tiktok_users",
                 params={
                     "select": "username,name,bio,pfp,visibility",
@@ -91,7 +129,8 @@ class Database(object):
             params["caption"] = "ilike.*%s*" % query
         if visible_or:
             params["or"] = visible_or
-        response = self.session.get(
+        response = self._send(
+            "get",
             self.base + "/tiktok_posts",
             headers={"Prefer": "count=exact"},
             params=params,
@@ -135,16 +174,12 @@ class Database(object):
         params = {"select": "post_id", "sec_uid": "eq.%s" % sec_uid, "limit": "1"}
         if extra:
             params.update(extra)
-        # A fresh request per call so the seven counts can run at once.
-        response = requests.get(
+        # Each count runs on its own thread and borrows a connection from the shared pool.
+        response = self._send(
+            "get",
             self.base + "/tiktok_posts",
-            headers={
-                "apikey": self.session.headers["apikey"],
-                "Authorization": self.session.headers["Authorization"],
-                "Prefer": "count=exact",
-            },
+            headers={"Prefer": "count=exact"},
             params=params,
-            timeout=QUERY_TIMEOUT,
             stream=True,
         )
         try:
@@ -157,7 +192,8 @@ class Database(object):
         ids = [post_id for post_id in post_ids if isinstance(post_id, str) and post_id.isdigit()]
         if not ids:
             return {}
-        response = self.session.get(
+        response = self._send(
+            "get",
             self.base + "/tiktok_posts",
             params={
                 "select": "post_id,thumbnail",
@@ -175,7 +211,8 @@ class Database(object):
         return found
 
     def post(self, post_id):
-        response = self.session.get(
+        response = self._send(
+            "get",
             self.base + "/tiktok_posts",
             params={
                 "select": "post_id,sec_uid,type,caption,chunks,thumbnail,slides,is_deleted,posted_at",
@@ -189,7 +226,8 @@ class Database(object):
         return rows[0] if rows else None
 
     def patch_post(self, post_id, fields):
-        response = self.session.patch(
+        response = self._send(
+            "patch",
             self.base + "/tiktok_posts",
             params={"post_id": "eq.%s" % post_id},
             headers={"Prefer": "return=minimal"},
@@ -199,7 +237,8 @@ class Database(object):
         response.raise_for_status()
 
     def patch_user(self, username, fields):
-        response = self.session.patch(
+        response = self._send(
+            "patch",
             self.base + "/tiktok_users",
             params={"username": "eq.%s" % username},
             headers={"Prefer": "return=minimal"},
