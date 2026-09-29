@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import requests
 from flask import Flask, Response, jsonify, request
+import scraper_client
 from db import Database
 from media import (
     DiscordFiles,
@@ -158,7 +159,7 @@ def premium_required(row=None):
     return jsonify({"error": error, "locked": True}), 402
 
 
-def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0, premium=True):
+def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0, premium=True, scrape=None):
     shown = [] if added else [present_post(row, post_is_locked(row, premium)) for row in posts]
     if added:
         total = 0
@@ -182,6 +183,7 @@ def lookup_payload(user, posts, added, username, total=None, counts=None, locked
         "total": total,
         "counts": counts,
         "lockedVideos": locked,
+        "firstScrape": scrape,
     }
 
 
@@ -282,6 +284,72 @@ def platforms():
 REMOVED_MESSAGE = "This account has been taken down following a legal request."
 
 
+def client_address():
+    forwarded = request.headers.get("X-Real-IP") or request.headers.get("X-Forwarded-For", "")
+    return forwarded.split(",")[0].strip()
+
+
+def account_ready(user):
+    if not user:
+        return False
+    return bool(user.get("sec_uid")) or user.get("visibility") in ("public", "private")
+
+
+class AccountOutcome(object):
+    def __init__(self, user=None, added=False, scrape=None, response=None):
+        self.user = user
+        self.added = added
+        self.scrape = scrape
+        self.response = response
+
+
+def account_failure(status, payload, username):
+    if status == 404:
+        return (
+            jsonify(
+                {
+                    "error": "@%s doesn't exist on TikTok." % username,
+                    "notFound": True,
+                    "username": username,
+                }
+            ),
+            404,
+        )
+    if status == 429:
+        return jsonify({"error": "Too many new accounts at once. Try again in a minute.", "retry": True}), 429
+    if status == 400:
+        return jsonify({"error": "Enter a username."}), 400
+    return (
+        jsonify({"error": "TikTok could not be reached to check @%s. Try again in a moment." % username, "retry": True}),
+        503,
+    )
+
+
+def ensure_account(store, username):
+    """The account, added first when it is new and really exists on TikTok.
+
+    sma-scraper checks TikTok, saves the row with its name and bio, and starts
+    the first scrape right away. An account that is already saved is untouched.
+    """
+    if store.is_removed(username):
+        return AccountOutcome(response=(jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410))
+    user = store.get_user(username)
+    if account_ready(user):
+        return AccountOutcome(user=user, scrape=scraper_client.scrape_state(username))
+    try:
+        status, payload = scraper_client.add_account(username, client_address())
+    except scraper_client.ScraperUnavailable:
+        app.logger.warning("scraper unavailable while adding %s", username)
+        return AccountOutcome(response=account_failure(503, {}, username))
+    if status != 200:
+        return AccountOutcome(response=account_failure(status, payload, username))
+    fresh = store.get_user(username) or {"username": payload.get("username") or username}
+    for key in ("name", "bio", "visibility"):
+        if not fresh.get(key) and payload.get(key):
+            fresh[key] = payload[key]
+    return AccountOutcome(user=fresh, added=payload.get("status") == "added", scrape=payload.get("scrape"))
+
+
 @app.get("/api/lookup")
 def lookup():
     platform = request.args.get("platform", "tiktok")
@@ -294,9 +362,10 @@ def lookup():
     if store is None:
         return jsonify({"error": "Supabase is not configured."}), 503
     try:
-        user, added = store.ensure_user(username)
-        if not user:
-            return jsonify({"error": REMOVED_MESSAGE, "removed": True}), 410
+        outcome = ensure_account(store, username)
+        if outcome.response is not None:
+            return outcome.response
+        user, added, scrape = outcome.user, outcome.added, outcome.scrape
         premium = viewer_is_premium()
         if added:
             page = {"posts": [], "total": 0}
@@ -306,7 +375,74 @@ def lookup():
             page, counts, locked = load_archive(store, user, premium, PAGE_LIMIT)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(lookup_payload(user, page["posts"], added, username, page["total"], counts, locked, premium))
+    return jsonify(
+        lookup_payload(user, page["posts"], added, username, page["total"], counts, locked, premium, scrape)
+    )
+
+
+@app.post("/api/add")
+def add():
+    """Add an account before anyone is signed in, so its first scrape is already running."""
+    username = clean_username(request.args.get("user", "") or (request.get_json(silent=True) or {}).get("user", ""))
+    if not username:
+        return jsonify({"error": "Enter a username."}), 400
+    store = database()
+    if store is None:
+        return jsonify({"error": "Supabase is not configured."}), 503
+    try:
+        outcome = ensure_account(store, username)
+    except requests.HTTPError:
+        return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
+    if outcome.response is not None:
+        return outcome.response
+    user = outcome.user
+    return jsonify(
+        {
+            "status": "added" if outcome.added else "known",
+            "username": user.get("username") or username,
+            "name": user.get("name") or "",
+            "bio": user.get("bio") or "",
+            "visibility": user.get("visibility") or "",
+            "pfpUrl": "/api/pfp/%s" % (user.get("username") or username) if user.get("pfp") else None,
+            "firstScrape": outcome.scrape,
+        }
+    )
+
+
+_STREAM_SLOTS = threading.BoundedSemaphore(6)
+STREAM_HEADERS = {
+    "Cache-Control": "no-cache, no-transform",
+    "X-Accel-Buffering": "no",
+}
+
+
+@app.get("/api/live/<username>")
+def live(username):
+    """Server-Sent Events for an account's first scrape."""
+    clean = clean_username(username)
+    if not clean:
+        return jsonify({"error": "Enter a username."}), 400
+    if not _STREAM_SLOTS.acquire(blocking=False):
+        return jsonify({"error": "Too many live viewers right now."}), 503
+
+    def generate():
+        try:
+            for line in scraper_client.stream_events(clean):
+                yield line
+        except scraper_client.ScraperUnavailable:
+            yield b"event: idle\ndata: {\"state\":\"none\"}\n\n"
+        finally:
+            _STREAM_SLOTS.release()
+
+    return Response(generate(), mimetype="text/event-stream", headers=STREAM_HEADERS)
+
+
+@app.get("/api/live/<username>/state")
+def live_state(username):
+    clean = clean_username(username)
+    if not clean:
+        return jsonify({"error": "Enter a username."}), 400
+    return jsonify({"firstScrape": scraper_client.scrape_state(clean)})
 
 
 @app.get("/api/posts")
@@ -374,7 +510,19 @@ def profile(username):
         page, counts, locked = load_archive(store, user, premium, 24)
     except requests.HTTPError:
         return jsonify({"error": "TikTok tables are not ready in Supabase yet."}), 503
-    return jsonify(lookup_payload(user, page["posts"], False, username, page["total"], counts, locked, premium))
+    return jsonify(
+        lookup_payload(
+            user,
+            page["posts"],
+            False,
+            username,
+            page["total"],
+            counts,
+            locked,
+            premium,
+            scraper_client.scrape_state(username),
+        )
+    )
 
 
 @app.get("/api/users")

@@ -135,8 +135,8 @@ class ApiTest(unittest.TestCase):
 
     def test_a_removed_account_cannot_be_looked_up_or_added(self):
         class Store(object):
-            def ensure_user(self, username):
-                return None, False
+            def is_removed(self, username):
+                return True
 
         with patch("app.database", return_value=Store()):
             response = self.client.get("/api/lookup?user=gone")

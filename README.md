@@ -15,7 +15,9 @@ gunicorn --bind 127.0.0.1:8000 app:app
 
 - `GET /health`
 - `GET /api/platforms` — one option, TikTok
-- `GET /api/lookup?user=name&platform=tiktok` — queues the username and returns the first page of stored posts
+- `GET /api/lookup?user=name&platform=tiktok` — returns the first page of stored posts. A username that is not saved yet is checked on TikTok first (`404` with `notFound` when it does not exist, `503` when TikTok could not be asked), then saved with its name and bio and scraped at once. `firstScrape` carries the live state of an account's first scrape, or `null`
+- `POST /api/add?user=name` — the same check-and-add without loading a timeline, used before sign-in so the first scrape is already running
+- `GET /api/live/<username>` — Server-Sent Events for that first scrape (current action, counts, each saved post). `GET /api/live/<username>/state` is the same snapshot as JSON
 - `GET /api/posts?user=name&offset=0&limit=12&order=latest|first&type=&status=&q=` — the next page for infinite scroll
 - `GET /api/post/<username>/<post_id>` — one archived post
 - `GET /api/users` — looked-up accounts
@@ -24,4 +26,4 @@ gunicorn --bind 127.0.0.1:8000 app:app
 - `GET /api/thumb/<post_id>` — refreshes the stored cover image
 - `GET /api/pfp/<username>` — refreshes the stored profile image
 
-Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `DISCORD_BOT_TOKEN`. Create the tables with `schema.sql` first. A lookup inserts the username; sma-scraper fills in the profile and posts.
+Set `SMA_SCRAPER_URL` (default `http://127.0.0.1:8100`) to reach sma-scraper's local API, which checks TikTok and runs the first scrape. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `DISCORD_BOT_TOKEN`. Create the tables with `schema.sql` first. A lookup inserts the username; sma-scraper fills in the profile and posts.
