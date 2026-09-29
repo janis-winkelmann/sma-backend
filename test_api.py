@@ -62,6 +62,33 @@ class ApiTest(unittest.TestCase):
         self.assertLess(elapsed, 0.6)
         self.assertEqual(IMAGE_CACHE, "public, max-age=86400")
 
+    def test_archive_stats_use_one_payload(self):
+        class Counting(Database):
+            def __init__(self):
+                self.calls = 0
+
+            def _archive_payload(self, sec_uid, cutoff):
+                self.calls += 1
+                return {
+                    "all": 4,
+                    "video": 3,
+                    "images": 1,
+                    "live": 0,
+                    "story": 0,
+                    "archived": 1,
+                    "deleted": 3,
+                    "locked": 2,
+                }
+
+        store = Counting()
+        counts, locked = store.archive_stats("sec", "2020-01-01T00:00:00Z")
+        self.assertEqual(store.calls, 1)
+        self.assertEqual(counts["all"], 4)
+        self.assertEqual(counts["deleted"], 3)
+        self.assertEqual(locked, 2)
+        _counts, unlocked = store.archive_stats("sec", None)
+        self.assertEqual(unlocked, 0)
+
     def test_platforms_are_tiktok_only(self):
         response = self.client.get("/api/platforms")
         self.assertEqual(response.status_code, 200)
@@ -92,6 +119,12 @@ class ApiTest(unittest.TestCase):
                     }],
                     "total": 40,
                 }
+
+            def archive_stats(self, sec_uid, cutoff):
+                return (
+                    {"all": 40, "video": 40, "images": 0, "live": 0, "story": 0, "archived": 10, "deleted": 30},
+                    3,
+                )
 
             def post_counts(self, sec_uid):
                 return {"all": 40, "video": 40, "images": 0, "live": 0, "story": 0, "archived": 10, "deleted": 30}
@@ -242,24 +275,24 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["posts"][0]["title"], "Clip")
         self.assertIsNone(payload["posts"][0]["thumbnailUrl"])
 
-    def test_old_videos_are_locked_for_free_accounts(self):
+    def test_deleted_posts_and_lives_are_locked_for_free_accounts(self):
         now = datetime(2026, 9, 25, tzinfo=timezone.utc)
-        old = {"type": "video", "posted_at": "2026-08-01T00:00:00Z"}
-        recent = {"type": "video", "posted_at": "2026-09-10T00:00:00Z"}
-        photo = {"type": "images", "posted_at": "2020-01-01T00:00:00Z"}
-        recent_photo = {"type": "images", "posted_at": "2026-09-10T00:00:00Z"}
-        undated = {"type": "live", "posted_at": None}
-        recent_live = {"type": "live", "posted_at": "2026-09-24T00:00:00Z"}
-        story = {"type": "story", "posted_at": "2020-01-01T00:00:00Z"}
-        self.assertTrue(post_is_locked(old, False, now))
-        self.assertFalse(post_is_locked(recent, False, now))
-        self.assertTrue(post_is_locked(photo, False, now))
-        self.assertFalse(post_is_locked(recent_photo, False, now))
+        old = {"type": "video", "is_deleted": False, "posted_at": "2026-08-01T00:00:00Z"}
+        deleted = {"type": "video", "is_deleted": True, "posted_at": "2026-09-10T00:00:00Z"}
+        photo = {"type": "images", "is_deleted": False, "posted_at": "2020-01-01T00:00:00Z"}
+        deleted_photo = {"type": "images", "is_deleted": True, "posted_at": "2026-09-10T00:00:00Z"}
+        undated = {"type": "live", "is_deleted": False, "posted_at": None}
+        recent_live = {"type": "live", "is_deleted": False, "posted_at": "2026-09-24T00:00:00Z"}
+        story = {"type": "story", "is_deleted": False, "posted_at": "2020-01-01T00:00:00Z"}
+        self.assertFalse(post_is_locked(old, False, now))
+        self.assertTrue(post_is_locked(deleted, False, now))
+        self.assertFalse(post_is_locked(deleted, True, now))
+        self.assertFalse(post_is_locked(photo, False, now))
+        self.assertTrue(post_is_locked(deleted_photo, False, now))
         self.assertTrue(post_is_locked(undated, False, now))
         self.assertTrue(post_is_locked(recent_live, False, now))
         self.assertFalse(post_is_locked(recent_live, True, now))
-        self.assertTrue(post_is_locked(story, False, now))
-        self.assertFalse(post_is_locked(old, True, now))
+        self.assertFalse(post_is_locked(story, False, now))
         self.assertEqual(free_visible_filter("2026-08-26T00:00:00Z"), "posted_at.gte.2026-08-26T00:00:00Z")
 
     def test_a_live_stays_recording_until_it_is_closed_or_goes_quiet(self):

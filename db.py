@@ -1,5 +1,6 @@
 import logging
 import os
+import socket
 import threading
 from concurrent.futures import ThreadPoolExecutor
 
@@ -12,8 +13,21 @@ from requests.adapters import HTTPAdapter
 _POOL_LOCK = threading.Lock()
 _POOL = None
 _HTTP = threading.local()
-QUERY_TIMEOUT = (20, 90)
+QUERY_TIMEOUT = (3, 6)
 log = logging.getLogger("sma.db")
+
+
+
+class SharedAdapter(HTTPAdapter):
+    """Bound a dead keep-alive so a stalled Supabase socket cannot sit for a minute."""
+
+    def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
+        options = list(kwargs.get("socket_options") or [])
+        user_timeout = getattr(socket, "TCP_USER_TIMEOUT", None)
+        if user_timeout is not None:
+            options.append((socket.IPPROTO_TCP, user_timeout, 5000))
+        kwargs["socket_options"] = options
+        return HTTPAdapter.init_poolmanager(self, connections, maxsize, block=block, **kwargs)
 
 
 def _shared_pool():
@@ -22,7 +36,7 @@ def _shared_pool():
         return _POOL
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = HTTPAdapter(pool_connections=8, pool_maxsize=40, max_retries=0, pool_block=True)
+            _POOL = SharedAdapter(pool_connections=8, pool_maxsize=40, max_retries=0, pool_block=True)
         return _POOL
 
 
@@ -152,6 +166,34 @@ class Database(object):
         rows = response.json()
         return {"posts": rows, "total": content_range_total(response.headers.get("Content-Range"), len(rows))}
 
+
+    def archive_stats(self, sec_uid, cutoff):
+        counts = empty_counts()
+        if not sec_uid:
+            return counts, 0
+        try:
+            payload = self._archive_payload(sec_uid, cutoff)
+        except requests.RequestException:
+            log.warning("archive counts fell back to separate queries")
+            return self.post_counts(sec_uid), self.locked_video_count(sec_uid, cutoff)
+        for key in counts:
+            counts[key] = int(payload.get(key) or 0)
+        locked = int(payload.get("locked") or 0) if cutoff else 0
+        return counts, locked
+
+    def _archive_payload(self, sec_uid, cutoff):
+        response = self._send(
+            "post",
+            self.base + "/rpc/archive_counts",
+            json={"p_sec_uid": sec_uid, "p_cutoff": cutoff},
+            timeout=QUERY_TIMEOUT,
+        )
+        response.raise_for_status()
+        payload = response.json()
+        if not isinstance(payload, dict):
+            raise requests.RequestException("archive counts")
+        return payload
+
     def post_counts(self, sec_uid, visible_or=None):
         counts = empty_counts()
         if not sec_uid:
@@ -178,7 +220,7 @@ class Database(object):
         return self._count(
             sec_uid,
             {
-                "or": "(posted_at.lt.%s,posted_at.is.null,type.eq.live)" % cutoff,
+                "or": "(is_deleted.eq.true,type.eq.live)",
             },
         )
 

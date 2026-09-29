@@ -138,24 +138,14 @@ def post_is_locked(row, premium, now=None):
         return False
     if row.get("type") == "live":
         return True
-    posted = row.get("posted_at")
-    if not posted:
-        return True
-    try:
-        parsed = datetime.fromisoformat(posted.replace("Z", "+00:00"))
-    except (AttributeError, ValueError):
-        return True
-    if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    cutoff = (now or datetime.now(timezone.utc)) - FREE_WINDOW
-    return parsed < cutoff
+    return bool(row.get("is_deleted"))
 
 
 def premium_required(row=None):
     if row and row.get("type") == "live":
         error = "Premium is required to watch lives."
     else:
-        error = "Premium is required to view posts older than 30 days."
+        error = "Premium is required to view deleted posts."
     return jsonify({"error": error, "locked": True}), 402
 
 
@@ -237,13 +227,11 @@ def present_post(row, locked=False):
 def load_archive(store, user, premium, limit):
     sec_uid = user.get("sec_uid")
     cutoff = None if premium else free_cutoff()
-    with ThreadPoolExecutor(max_workers=3) as pool:
+    with ThreadPoolExecutor(max_workers=2) as pool:
         page_future = pool.submit(store.posts_page, sec_uid, 0, limit, "latest", "all", "all", "")
-        counts_future = pool.submit(store.post_counts, sec_uid)
-        locked_future = pool.submit(store.locked_video_count, sec_uid, cutoff)
+        stats_future = pool.submit(store.archive_stats, sec_uid, cutoff)
         page = page_future.result()
-        counts = counts_future.result()
-        locked = 0 if premium else locked_future.result()
+        counts, locked = stats_future.result()
     return page, counts, locked
 
 
