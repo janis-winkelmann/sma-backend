@@ -393,10 +393,19 @@ def take_bytes(pieces, count, skip=0):
             return
 
 
-SPAN_TIMEOUT = (4, 3)
-SPAN_ATTEMPTS = 4
+SPAN_TIMEOUT = (1.5, 3)
+SPAN_ATTEMPTS = 5
 SPAN_STALL_SECONDS = 3
 SPAN_STALL_BYTES = 32 * 1024
+
+
+_CDN = requests.Session()
+_CDN.mount("https://", HTTPAdapter(pool_connections=4, pool_maxsize=64, max_retries=0))
+
+
+def cdn_get(url, **kwargs):
+    # Reused connections skip the TCP handshake, which this server's network sometimes drops and retries a second later.
+    return _CDN.get(url, **kwargs)
 
 
 def fetch_span(url, start, count, whole_size=None):
@@ -414,7 +423,7 @@ def fetch_span(url, start, count, whole_size=None):
         headers = {"Range": "bytes=%s-%s" % (offset, last_end)} if partial else {}
         response = None
         try:
-            response = requests.get(url, headers=headers, stream=True, timeout=SPAN_TIMEOUT)
+            response = cdn_get(url, headers=headers, stream=True, timeout=SPAN_TIMEOUT)
             response.raise_for_status()
             skip = offset if partial and response.status_code == 200 else 0
             window = time.monotonic()
@@ -499,12 +508,12 @@ class DiscordFiles(object):
 
     def refresh(self, urls):
         last = None
-        for attempt in range(2):
+        for attempt in range(3):
             try:
                 response = self.session.post(
                     API + "/attachments/refresh-urls",
                     json={"attachment_urls": urls},
-                    timeout=(3, 5),
+                    timeout=(1.5, 5),
                 )
                 response.raise_for_status()
                 fresh = {}
@@ -513,7 +522,7 @@ class DiscordFiles(object):
                 return fresh
             except requests.RequestException as exc:
                 last = exc
-                if attempt == 0:
+                if attempt < 2:
                     time.sleep(0.3)
         raise last
 

@@ -158,7 +158,7 @@ class SpanTest(unittest.TestCase):
             first = int(headers["Range"].split("=")[1].split("-")[0])
             return FakeResponse(blob[first:], 206)
 
-        with patch("media.requests.get", fake_get), patch("media.time.sleep"):
+        with patch("media.cdn_get", fake_get), patch("media.time.sleep"):
             out = b"".join(media.fetch_span("u", 0, len(blob), len(blob)))
         self.assertEqual(out, blob)
         self.assertEqual(len(calls), 2)
@@ -170,6 +170,6 @@ class SpanTest(unittest.TestCase):
         def broken(url, headers, stream, timeout):
             raise media.requests.ConnectionError("down")
 
-        with patch("media.requests.get", broken), patch("media.time.sleep"):
+        with patch("media.cdn_get", broken), patch("media.time.sleep"):
             with self.assertRaises(media.requests.ConnectionError):
                 list(media.fetch_span("u", 0, 10, 10))
