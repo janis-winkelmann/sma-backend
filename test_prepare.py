@@ -137,3 +137,39 @@ class DownloadTest(unittest.TestCase):
         with open(parts[0], "rb") as handle:
             self.assertEqual(handle.read(), blob)
         self.assertEqual(calls[-1], {"Range": "bytes=1000-"})
+
+
+class SpanTest(unittest.TestCase):
+    def test_a_stream_that_dies_halfway_continues_where_it_stopped(self):
+        import media
+
+        blob = bytes(range(256)) * 1000
+        calls = []
+
+        class Dying(FakeResponse):
+            def iter_content(self, size):
+                yield self.body[:70000]
+                raise media.requests.ConnectionError("reset")
+
+        def fake_get(url, headers, stream, timeout):
+            calls.append(headers.get("Range"))
+            if len(calls) == 1:
+                return Dying(blob, 200)
+            first = int(headers["Range"].split("=")[1].split("-")[0])
+            return FakeResponse(blob[first:], 206)
+
+        with patch("media.requests.get", fake_get), patch("media.time.sleep"):
+            out = b"".join(media.fetch_span("u", 0, len(blob), len(blob)))
+        self.assertEqual(out, blob)
+        self.assertEqual(len(calls), 2)
+        self.assertGreaterEqual(int(calls[1].split("=")[1].split("-")[0]), 65536)
+
+    def test_gives_up_after_repeated_failures(self):
+        import media
+
+        def broken(url, headers, stream, timeout):
+            raise media.requests.ConnectionError("down")
+
+        with patch("media.requests.get", broken), patch("media.time.sleep"):
+            with self.assertRaises(media.requests.ConnectionError):
+                list(media.fetch_span("u", 0, 10, 10))

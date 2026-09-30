@@ -393,6 +393,54 @@ def take_bytes(pieces, count, skip=0):
             return
 
 
+SPAN_TIMEOUT = (5, 8)
+SPAN_ATTEMPTS = 4
+SPAN_STALL_SECONDS = 10
+SPAN_STALL_BYTES = 32 * 1024
+
+
+def fetch_span(url, start, count, whole_size=None):
+    """Yield exactly count bytes of a stored file from offset start.
+
+    The file host sometimes stalls or drops a connection halfway. That attempt is abandoned
+    and the next one continues from the bytes already delivered instead of failing the viewer.
+    """
+    delivered = 0
+    failures = 0
+    last_end = start + count - 1
+    while delivered < count:
+        offset = start + delivered
+        partial = offset > 0 or (whole_size is not None and last_end < whole_size - 1)
+        headers = {"Range": "bytes=%s-%s" % (offset, last_end)} if partial else {}
+        response = None
+        try:
+            response = requests.get(url, headers=headers, stream=True, timeout=SPAN_TIMEOUT)
+            response.raise_for_status()
+            skip = offset if partial and response.status_code == 200 else 0
+            window = time.monotonic()
+            window_bytes = 0
+            for piece in take_bytes(response.iter_content(32 * 1024), count - delivered, skip):
+                delivered += len(piece)
+                window_bytes += len(piece)
+                yield piece
+                if time.monotonic() - window >= SPAN_STALL_SECONDS:
+                    if window_bytes < SPAN_STALL_BYTES:
+                        raise OSError("stalled")
+                    window = time.monotonic()
+                    window_bytes = 0
+            if delivered >= count:
+                return
+            raise OSError("ended early")
+        except (requests.RequestException, OSError):
+            failures += 1
+            if failures >= SPAN_ATTEMPTS:
+                raise
+            time.sleep(0.2 * failures)
+        finally:
+            if response is not None:
+                response.close()
+
+
 def chunk_uploaded_at(chunk):
     raw = chunk.get("uploaded_at") if isinstance(chunk, dict) else None
     if not raw:
@@ -597,19 +645,6 @@ class DiscordFiles(object):
                     continue
                 offset = int(chunk.get("byte_offset") or 0)
                 size = (chunk_size(chunk) or 0) + offset
-                real_start = local_start + offset
-                real_end = local_end + offset
-                headers = {}
-                partial = real_start > 0 or real_end < size - 1
-                if partial:
-                    headers["Range"] = "bytes=%s-%s" % (real_start, real_end)
-                response = requests.get(url, headers=headers, stream=True, timeout=60)
-                try:
-                    response.raise_for_status()
-                    skip = real_start if partial and response.status_code == 200 else 0
-                    for piece in take_bytes(response.iter_content(256 * 1024), count, skip):
-                        yield piece
-                finally:
-                    response.close()
+                yield from fetch_span(url, local_start + offset, count, size)
 
         return generate()
