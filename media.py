@@ -393,9 +393,9 @@ def take_bytes(pieces, count, skip=0):
             return
 
 
-SPAN_TIMEOUT = (5, 8)
+SPAN_TIMEOUT = (4, 3)
 SPAN_ATTEMPTS = 4
-SPAN_STALL_SECONDS = 10
+SPAN_STALL_SECONDS = 3
 SPAN_STALL_BYTES = 32 * 1024
 
 
