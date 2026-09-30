@@ -1,4 +1,5 @@
 import base64
+import hmac
 import os
 import threading
 from concurrent.futures import ThreadPoolExecutor
@@ -121,7 +122,17 @@ FREE_WINDOW = timedelta(days=30)
 
 
 def viewer_is_premium():
-    return request.headers.get("X-Sma-Plan", "premium").strip().lower() != "free"
+    """The plan header is only believed when it comes with the key the frontend server holds.
+
+    nginx forwards /api/ to this app, so a plain header would let any visitor claim premium.
+    """
+    key = os.environ.get("SMA_INTERNAL_KEY", "").strip()
+    if not key:
+        return False
+    sent = request.headers.get("X-Sma-Internal", "").strip()
+    if not hmac.compare_digest(sent.encode("utf-8"), key.encode("utf-8")):
+        return False
+    return request.headers.get("X-Sma-Plan", "").strip().lower() == "premium"
 
 
 def free_cutoff(now=None):

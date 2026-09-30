@@ -27,3 +27,7 @@ gunicorn --bind 127.0.0.1:8000 app:app
 - `GET /api/pfp/<username>` — refreshes the stored profile image
 
 Set `SMA_SCRAPER_URL` (default `http://127.0.0.1:8100`) to reach sma-scraper's local API, which checks TikTok and runs the first scrape. Set `SUPABASE_URL`, `SUPABASE_SERVICE_ROLE_KEY`, and `DISCORD_BOT_TOKEN`. Create the tables with `schema.sql` first. A lookup inserts the username; sma-scraper fills in the profile and posts.
+
+## Plan enforcement
+
+`/api/*` is reachable from the internet through nginx, so the `X-Sma-Plan` header is only trusted when the request also carries `X-Sma-Internal` equal to the `SMA_INTERNAL_KEY` environment variable. Set the same value for the backend and the frontend server. Without the key every caller is treated as free, so locked posts stay locked.

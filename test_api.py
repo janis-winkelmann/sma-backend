@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 import requests
 import time
 
-from app import IMAGE_CACHE, app, free_visible_filter, lookup_payload, post_is_locked, present_post
+from app import IMAGE_CACHE, app, free_visible_filter, lookup_payload, post_is_locked, present_post, viewer_is_premium
 from db import Database
 from media import (
     audio_header_patch,
@@ -39,7 +39,26 @@ import shutil
 
 class ApiTest(unittest.TestCase):
     def setUp(self):
+        patcher = patch.dict(os.environ, {"SMA_INTERNAL_KEY": "test-key"})
+        patcher.start()
+        self.addCleanup(patcher.stop)
         self.client = app.test_client()
+        self.client.environ_base.update({"HTTP_X_SMA_INTERNAL": "test-key", "HTTP_X_SMA_PLAN": "premium"})
+
+    def test_plan_header_needs_the_internal_key(self):
+        with app.test_request_context("/", headers={"X-Sma-Plan": "premium"}):
+            self.assertFalse(viewer_is_premium())
+        with app.test_request_context("/", headers={"X-Sma-Plan": "premium", "X-Sma-Internal": "wrong"}):
+            self.assertFalse(viewer_is_premium())
+        with app.test_request_context("/", headers={"X-Sma-Internal": "test-key"}):
+            self.assertFalse(viewer_is_premium())
+        with app.test_request_context("/", headers={"X-Sma-Plan": "free", "X-Sma-Internal": "test-key"}):
+            self.assertFalse(viewer_is_premium())
+        with app.test_request_context("/", headers={"X-Sma-Plan": "premium", "X-Sma-Internal": "test-key"}):
+            self.assertTrue(viewer_is_premium())
+        with patch.dict(os.environ, {"SMA_INTERNAL_KEY": ""}):
+            with app.test_request_context("/", headers={"X-Sma-Plan": "premium", "X-Sma-Internal": ""}):
+                self.assertFalse(viewer_is_premium())
 
 
     def test_archive_counts_run_together(self):
