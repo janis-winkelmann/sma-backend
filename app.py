@@ -22,7 +22,7 @@ from media import (
     moov_end,
     replace_urls,
 )
-from playback import discard_live_cache, ensure_playable, live_should_remux, publish_exact
+from playback import discard_live_cache, ensure_playable, live_should_remux, prepare_progress, publish_exact
 
 app = Flask(__name__)
 
@@ -706,6 +706,27 @@ def media(post_id):
         body = files.stream_slices(plan["slices"], mapping)
         status = plan["status"]
     return Response(body, status=status, mimetype=mime, headers=headers)
+
+
+@app.get("/api/prepare/<post_id>")
+def prepare(post_id):
+    store = database()
+    if store is None:
+        return jsonify({"error": "Storage is not configured."}), 503
+    try:
+        row = store.post(post_id)
+    except requests.RequestException:
+        return jsonify({"error": "Could not load this video."}), 503
+    if post_is_locked(row, viewer_is_premium()):
+        return premium_required(row)
+    chunks = (row or {}).get("chunks") or []
+    if not chunks or (row or {}).get("type") != "live" or chunks_are_playable(chunks):
+        payload = {"state": "ready", "percent": 100, "etaSeconds": 0}
+    else:
+        payload = prepare_progress(post_id, chunks)
+    response = jsonify(payload)
+    response.headers["Cache-Control"] = "no-store"
+    return response
 
 
 @app.get("/api/slide/<post_id>/<int:index>")

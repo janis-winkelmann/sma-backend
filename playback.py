@@ -351,6 +351,71 @@ def ensure_playable(post_id, chunks, files, patch, remember=None, wait_seconds=N
     return found
 
 
+DOWNLOAD_SHARE = 0.65
+ASSEMBLE_SHARE = 0.05
+
+
+def _file_size(path):
+    try:
+        return os.path.getsize(path)
+    except OSError:
+        return 0
+
+
+def prepare_progress(post_id, chunks, now=None):
+    """How far along the phone-friendly copy of a live is: state, stage, percent and seconds left."""
+    ordered = sorted(chunks or [], key=lambda item: int(item.get("index") or 0))
+    if not ordered:
+        return {"state": "none", "percent": 0, "etaSeconds": None}
+    signature = live_signature(post_id, ordered)
+    directory = os.path.join(CACHE_ROOT, safe_post_id(post_id))
+    if cached_choice(directory, signature):
+        return {"state": "ready", "percent": 100, "etaSeconds": 0}
+    if not _any_running(directory):
+        if _recently_failed(os.path.join(directory, signature + ".failed")):
+            return {"state": "failed", "percent": 0, "etaSeconds": None}
+        return {"state": "waiting", "percent": 0, "etaSeconds": None}
+
+    sizes = [int(chunk.get("size") or 0) for chunk in ordered]
+    total = sum(sizes)
+    if total <= 0:
+        return {"state": "working", "stage": "download", "percent": 0, "etaSeconds": None}
+    have = 0
+    for index, expected in enumerate(sizes):
+        base = os.path.join(directory, "chunk-%03d.bin" % index)
+        size = _file_size(base)
+        if expected and size >= expected:
+            have += expected
+        else:
+            have += min(expected, _file_size(base + ".partial") or size)
+    source = os.path.join(directory, signature + ".src")
+    target = os.path.join(directory, signature + ".mp4.tmp")
+    if _file_size(target) > 0:
+        stage = "convert"
+        made = min(1.0, _file_size(target) / (total * 0.98))
+        fraction = DOWNLOAD_SHARE + ASSEMBLE_SHARE + (1 - DOWNLOAD_SHARE - ASSEMBLE_SHARE) * made
+    elif _file_size(source) > 0:
+        stage = "assemble"
+        fraction = DOWNLOAD_SHARE + ASSEMBLE_SHARE * min(1.0, _file_size(source) / total)
+    else:
+        stage = "download"
+        fraction = DOWNLOAD_SHARE * min(1.0, have / total)
+    fraction = min(0.99, max(0.0, fraction))
+
+    moment = time.time() if now is None else now
+    started = None
+    try:
+        started = os.path.getmtime(os.path.join(directory, signature + ".job.json"))
+    except OSError:
+        pass
+    eta = None
+    if started is not None and fraction >= 0.04:
+        elapsed = max(0.0, moment - started)
+        if elapsed >= 2:
+            eta = int(round(elapsed * (1 - fraction) / fraction))
+    return {"state": "working", "stage": stage, "percent": int(fraction * 100), "etaSeconds": eta}
+
+
 def _download_parts(urls, directory, sizes=None):
     def one(index):
         expected = int(sizes[index]) if sizes and index < len(sizes) else 0
