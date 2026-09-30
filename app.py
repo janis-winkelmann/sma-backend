@@ -720,8 +720,9 @@ def prepare(post_id):
     if post_is_locked(row, viewer_is_premium()):
         return premium_required(row)
     chunks = (row or {}).get("chunks") or []
+    total = sum(int(chunk.get("size") or 0) for chunk in chunks)
     if not chunks or (row or {}).get("type") != "live" or chunks_are_playable(chunks):
-        payload = {"state": "ready", "percent": 100, "etaSeconds": 0}
+        payload = {"state": "ready", "percent": 100, "etaSeconds": 0, "bytes": total, "totalBytes": total}
     else:
         payload = prepare_progress(post_id, chunks)
     response = jsonify(payload)

@@ -52,6 +52,8 @@ class ProgressTest(unittest.TestCase):
         self.assertEqual(result["stage"], "download")
         self.assertEqual(result["percent"], 48)
         self.assertEqual(result["etaSeconds"], 11)
+        self.assertEqual(result["bytes"], 1500)
+        self.assertEqual(result["totalBytes"], 2000)
 
     def test_convert_stage_follows_the_output_file(self):
         self.job(1000)

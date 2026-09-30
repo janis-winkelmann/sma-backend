@@ -371,15 +371,15 @@ def prepare_progress(post_id, chunks, now=None):
         return {"state": "none", "percent": 0, "etaSeconds": None}
     signature = live_signature(post_id, ordered)
     directory = os.path.join(CACHE_ROOT, safe_post_id(post_id))
-    if cached_choice(directory, signature):
-        return {"state": "ready", "percent": 100, "etaSeconds": 0}
-    if not _any_running(directory):
-        if _recently_failed(os.path.join(directory, signature + ".failed")):
-            return {"state": "failed", "percent": 0, "etaSeconds": None}
-        return {"state": "waiting", "percent": 0, "etaSeconds": None}
-
     sizes = [int(chunk.get("size") or 0) for chunk in ordered]
     total = sum(sizes)
+    if cached_choice(directory, signature):
+        return {"state": "ready", "percent": 100, "etaSeconds": 0, "bytes": total, "totalBytes": total}
+    if not _any_running(directory):
+        if _recently_failed(os.path.join(directory, signature + ".failed")):
+            return {"state": "failed", "percent": 0, "etaSeconds": None, "totalBytes": total}
+        return {"state": "waiting", "percent": 0, "etaSeconds": None, "bytes": 0, "totalBytes": total}
+
     if total <= 0:
         return {"state": "working", "stage": "download", "percent": 0, "etaSeconds": None}
     have = 0
@@ -415,7 +415,15 @@ def prepare_progress(post_id, chunks, now=None):
         elapsed = max(0.0, moment - started)
         if elapsed >= 2:
             eta = int(round(elapsed * (1 - fraction) / fraction))
-    return {"state": "working", "stage": stage, "percent": int(fraction * 100), "etaSeconds": eta}
+    shown_bytes = total if stage != "download" else min(total, have)
+    return {
+        "state": "working",
+        "stage": stage,
+        "percent": int(fraction * 100),
+        "etaSeconds": eta,
+        "bytes": shown_bytes,
+        "totalBytes": total,
+    }
 
 
 def _download_parts(urls, directory, sizes=None):
