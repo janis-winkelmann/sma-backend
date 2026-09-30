@@ -98,3 +98,42 @@ class PrepareRouteTest(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class FakeResponse(object):
+    def __init__(self, body, status=200):
+        self.body = body
+        self.status_code = status
+
+    def raise_for_status(self):
+        pass
+
+    def iter_content(self, size):
+        for start in range(0, len(self.body), size):
+            yield self.body[start : start + size]
+
+    def close(self):
+        pass
+
+
+class DownloadTest(unittest.TestCase):
+    def test_a_dropped_download_resumes_from_the_saved_bytes(self):
+        directory = tempfile.mkdtemp()
+        self.addCleanup(shutil.rmtree, directory, True)
+        blob = bytes(range(256)) * 400
+        calls = []
+
+        def fake_get(url, stream, timeout, headers):
+            calls.append(dict(headers))
+            if len(calls) == 1:
+                raise playback.requests.ConnectionError("dropped")
+            offset = int(headers["Range"].split("=")[1].rstrip("-")) if headers else 0
+            return FakeResponse(blob[offset:], 206 if offset else 200)
+
+        with open(os.path.join(directory, "chunk-000.bin.partial"), "wb") as handle:
+            handle.write(blob[:1000])
+        with patch("playback.requests.get", fake_get), patch("playback.time.sleep"):
+            parts = playback._download_parts(["u"], directory, [len(blob)])
+        with open(parts[0], "rb") as handle:
+            self.assertEqual(handle.read(), blob)
+        self.assertEqual(calls[-1], {"Range": "bytes=1000-"})

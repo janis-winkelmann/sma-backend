@@ -351,6 +351,8 @@ def ensure_playable(post_id, chunks, files, patch, remember=None, wait_seconds=N
     return found
 
 
+STALL_WINDOW = 20
+STALL_MIN_BYTES = 64 * 1024
 DOWNLOAD_SHARE = 0.65
 ASSEMBLE_SHARE = 0.05
 
@@ -427,19 +429,33 @@ def _download_parts(urls, directory, sizes=None):
         except OSError:
             pass
         last_error = "error"
-        for attempt in range(4):
+        for attempt in range(6):
             response = None
             try:
-                try:
-                    os.remove(partial)
-                except OSError:
-                    pass
-                response = requests.get(urls[index], stream=True, timeout=(10, 25))
+                # A stalled attempt is dropped and the next one continues from the bytes already saved.
+                have = _file_size(partial)
+                if expected and have >= expected:
+                    have = 0
+                headers = {"Range": "bytes=%d-" % have} if have else {}
+                response = requests.get(urls[index], stream=True, timeout=(10, 15), headers=headers)
                 response.raise_for_status()
-                with open(partial, "wb") as handle:
-                    for piece in response.iter_content(256 * 1024):
-                        if piece:
-                            handle.write(piece)
+                if have and response.status_code != 206:
+                    have = 0
+                window_start = time.monotonic()
+                window_bytes = 0
+                with open(partial, "ab" if have else "wb") as handle:
+                    for piece in response.iter_content(16 * 1024):
+                        if not piece:
+                            continue
+                        handle.write(piece)
+                        handle.flush()
+                        window_bytes += len(piece)
+                        elapsed = time.monotonic() - window_start
+                        if elapsed >= STALL_WINDOW:
+                            if window_bytes < STALL_MIN_BYTES:
+                                raise OSError("slow")
+                            window_start = time.monotonic()
+                            window_bytes = 0
                 if expected and os.path.getsize(partial) != expected:
                     raise OSError("short")
                 os.replace(partial, dest)
