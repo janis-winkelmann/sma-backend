@@ -10,6 +10,9 @@ from requests.adapters import HTTPAdapter
 API = "https://discord.com/api/v10"
 USER_AGENT = "DiscordBot (https://github.com/janis-winkelmann/sma-backend, 1.0)"
 EXPIRY_LEEWAY = 120
+REFRESH_BATCH = 50
+_FRESH_LINKS = {}
+_FRESH_LOCK = threading.Lock()
 IMAGE_MAX_BYTES = 12 * 1024 * 1024
 
 
@@ -466,6 +469,33 @@ class DiscordFiles(object):
                     time.sleep(0.3)
         raise last
 
+    def refresh_many(self, urls):
+        """Refresh links in groups Discord accepts, remembering fresh ones so a big live is not re-asked on every request."""
+        fresh = {}
+        pending = []
+        now = time.time()
+        with _FRESH_LOCK:
+            for url in urls:
+                cached = _FRESH_LINKS.get(url)
+                if cached and link_is_live(cached, now):
+                    fresh[url] = cached
+                else:
+                    pending.append(url)
+        for start in range(0, len(pending), REFRESH_BATCH):
+            group = pending[start : start + REFRESH_BATCH]
+            try:
+                got = self.refresh(group)
+            except requests.RequestException:
+                continue
+            with _FRESH_LOCK:
+                for original, new in got.items():
+                    _FRESH_LINKS[original] = new
+                if len(_FRESH_LINKS) > 4000:
+                    for key in list(_FRESH_LINKS)[:1000]:
+                        _FRESH_LINKS.pop(key, None)
+            fresh.update(got)
+        return fresh
+
     def upload(self, channel_id, filename, data, content_type="video/mp4"):
         response = None
         last = "error"
@@ -530,10 +560,7 @@ class DiscordFiles(object):
                 stale.append(url)
         updates = {}
         if stale:
-            try:
-                refreshed = self.refresh(stale)
-            except requests.RequestException:
-                refreshed = {}
+            refreshed = self.refresh_many(stale)
             for url in stale:
                 new = refreshed.get(url) or url
                 mapping[url] = new

@@ -385,6 +385,28 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(mapping[stored], stored)
         self.assertEqual(updates, {})
 
+    def test_a_long_live_is_refreshed_in_groups_discord_accepts(self):
+        import media
+
+        media._FRESH_LINKS.clear()
+        files = DiscordFiles("token")
+        now = int(time.time())
+        stored = ["https://cdn.discordapp.com/attachments/1/2/p%03d.mp4?ex=%x&is=aa&hm=bb" % (i, now - 10) for i in range(120)]
+        sizes = []
+
+        def refresh(urls):
+            sizes.append(len(urls))
+            return {url: url.replace("&is=aa", "&is=zz").replace("ex=%x" % (now - 10), "ex=%x" % (now + 80000)) for url in urls}
+
+        files.refresh = refresh
+        mapping, updates = files.prepare(stored)
+        self.assertEqual(sizes, [50, 50, 20])
+        self.assertEqual(len(updates), 120)
+        self.assertTrue(all("is=zz" in mapping[url] for url in stored))
+        files.prepare(stored)
+        self.assertEqual(sizes, [50, 50, 20])
+        media._FRESH_LINKS.clear()
+
     def test_a_recording_live_changes_its_media_url_as_chunks_arrive(self):
         recent = (datetime.now(timezone.utc) - timedelta(minutes=1)).strftime("%Y-%m-%dT%H:%M:%SZ")
         payload = present_post(
