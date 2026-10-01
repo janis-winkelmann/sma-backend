@@ -137,7 +137,7 @@ class Database(object):
         if not sec_uid:
             return {"posts": [], "total": 0}
         params = {
-            "select": "post_id,type,caption,chunks,thumbnail,slides,is_deleted,posted_at",
+            "select": "post_id,type,caption,mentions,chunks,thumbnail,slides,is_deleted,posted_at",
             "sec_uid": "eq.%s" % sec_uid,
             "order": "posted_at.asc.nullslast,post_id.asc"
             if order == "first"
@@ -269,7 +269,7 @@ class Database(object):
             "get",
             self.base + "/tiktok_posts",
             params={
-                "select": "post_id,sec_uid,type,caption,chunks,thumbnail,slides,is_deleted,posted_at",
+                "select": "post_id,sec_uid,type,caption,mentions,chunks,thumbnail,slides,is_deleted,posted_at",
                 "post_id": "eq.%s" % post_id,
                 "limit": "1",
             },

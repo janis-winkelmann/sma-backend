@@ -3,6 +3,7 @@ create table if not exists public.tiktok_users (
   username text not null unique,
   name text,
   bio text,
+  bio_mentions jsonb not null default '[]'::jsonb,
   pfp text,
   sec_uid text unique,
   visibility text,
@@ -17,6 +18,7 @@ create table if not exists public.tiktok_posts (
   is_deleted boolean not null default false,
   type text not null check (type in ('video', 'live', 'story', 'images')),
   caption text,
+  mentions jsonb not null default '[]'::jsonb,
   chunks jsonb not null default '[]'::jsonb,
   thumbnail text,
   slides jsonb not null default '[]'::jsonb,
@@ -26,6 +28,8 @@ create table if not exists public.tiktok_posts (
 
 alter table public.tiktok_posts add column if not exists thumbnail text;
 alter table public.tiktok_posts add column if not exists slides jsonb not null default '[]'::jsonb;
+alter table public.tiktok_posts add column if not exists mentions jsonb not null default '[]'::jsonb;
+alter table public.tiktok_users add column if not exists bio_mentions jsonb not null default '[]'::jsonb;
 
 create index if not exists tiktok_users_last_scraped_idx
   on public.tiktok_users (last_scraped);
