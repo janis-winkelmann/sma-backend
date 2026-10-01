@@ -1,6 +1,7 @@
 import base64
 import hmac
 import os
+import re
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta, timezone
@@ -27,6 +28,29 @@ from playback import discard_live_cache, ensure_playable, live_should_remux, pre
 app = Flask(__name__)
 
 PLATFORMS = [{"id": "tiktok", "label": "TikTok"}]
+HANDLE = re.compile(r"^[a-z0-9._]{1,24}$")
+
+
+def clean_mentions(value):
+    if not isinstance(value, list):
+        return []
+    cleaned = []
+    for item in value:
+        if not isinstance(item, dict):
+            continue
+        username = str(item.get("username") or "").strip().lower()
+        if not HANDLE.fullmatch(username):
+            continue
+        try:
+            start = int(item.get("start"))
+            end = int(item.get("end"))
+        except (TypeError, ValueError):
+            continue
+        if start < 0 or end <= start or end > 10000:
+            continue
+        cleaned.append({"start": start, "end": end, "username": username})
+    cleaned.sort(key=lambda item: (item["start"], item["end"]))
+    return cleaned
 
 
 _clients = threading.local()
@@ -177,6 +201,7 @@ def lookup_payload(user, posts, added, username, total=None, counts=None, locked
         "username": user.get("username") or username,
         "name": user.get("name") or "",
         "bio": user.get("bio") or "",
+        "bioMentions": clean_mentions(user.get("bio_mentions")),
         "visibility": user.get("visibility") or "",
         "pfpUrl": "/api/pfp/%s" % username if user.get("pfp") else None,
         "added": added,
@@ -231,6 +256,7 @@ def present_post(row, locked=False):
         "imageCount": len(image_urls),
         "postedAt": row.get("posted_at") or None,
         "recording": kind == "live" and live_is_recording(chunks),
+        "mentions": clean_mentions(row.get("mentions")),
     }
 
 
