@@ -986,7 +986,12 @@ def pfp(username):
         return jsonify({"error": "Storage is not configured."}), 503
     user = store.get_user(clean_username(username))
     if not user or not user.get("pfp"):
-        return jsonify({"error": "No profile image stored."}), 404
+        # A picture often arrives a few seconds into the first scrape. A cached miss
+        # would keep the page blank for a day after the file is stored.
+        missing = jsonify({"error": "No profile image stored."})
+        missing.status_code = 404
+        missing.headers["Cache-Control"] = "no-store"
+        return missing
     image = deliver_image(
         files,
         user["pfp"],
@@ -994,5 +999,8 @@ def pfp(username):
     )
     if image is None:
         app.logger.warning("profile image %s unavailable", clean_username(username))
-        return jsonify({"error": "Profile image is unavailable."}), 502
+        failed = jsonify({"error": "Profile image is unavailable."})
+        failed.status_code = 502
+        failed.headers["Cache-Control"] = "no-store"
+        return failed
     return image

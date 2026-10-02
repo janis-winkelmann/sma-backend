@@ -658,6 +658,16 @@ class ApiTest(unittest.TestCase):
         del appmod._THUMB_ORDER[:]
         appmod._THUMB_BYTES = 0
 
+    def test_a_missing_profile_image_is_not_cached(self):
+        class Store(object):
+            def get_user(self, username):
+                return {"username": username, "pfp": ""}
+
+        with patch("app.database", return_value=Store()), patch("app.discord_files", return_value=object()):
+            response = self.client.get("/api/pfp/lillaamatilda")
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.get_json()["error"], "No profile image stored.")
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
 
 
 if __name__ == "__main__":
