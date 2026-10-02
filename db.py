@@ -2,10 +2,22 @@ import logging
 import os
 import socket
 import threading
+import time
 from concurrent.futures import ThreadPoolExecutor
 
 import requests
 from requests.adapters import HTTPAdapter
+
+# sma_removed is a handful of usernames, but every profile, post, and lookup checks it.
+# One read a minute for the whole process replaces a request on every page view.
+REMOVED_TTL = 60
+_REMOVED_LOCK = threading.Lock()
+_REMOVED_UNTIL = 0.0
+_REMOVED_NAMES = frozenset()
+# The same account is read again for its photo, its posts, and the page around it.
+USER_TTL = 20
+_USER_LOCK = threading.Lock()
+_USER_CACHE = {}
 
 # Every gunicorn thread used to open its own TLS connection, and the count
 # queries opened yet another. Those handshakes are what timed out. One pool
@@ -71,25 +83,74 @@ class Database(object):
             return getattr(self._session(), method)(url, **kwargs)
 
     def get_user(self, username):
+        key = _account_key(username)
+        if not key:
+            return None
+        now = time.monotonic()
+        with _USER_LOCK:
+            hit = _USER_CACHE.get(key)
+            if hit is not None and now < hit[0]:
+                return hit[1]
         response = self._send(
             "get",
             self.base + "/tiktok_users",
-            params={"select": "*", "username": "eq.%s" % username, "limit": "1"},
+            params={"select": "*", "username": "eq.%s" % key, "limit": "1"},
             timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
         rows = response.json()
-        return rows[0] if rows else None
+        row = rows[0] if rows else None
+        # A miss stays uncached so an account added a moment later is visible on the next read.
+        if row is None:
+            return None
+        with _USER_LOCK:
+            _USER_CACHE[key] = (time.monotonic() + USER_TTL, row)
+            if len(_USER_CACHE) > 2000:
+                expired = [name for name, item in _USER_CACHE.items() if item[0] <= time.monotonic()]
+                for name in expired:
+                    _USER_CACHE.pop(name, None)
+        return row
 
     def is_removed(self, username):
-        response = self._send(
-            "get",
-            self.base + "/sma_removed",
-            params={"select": "username", "username": "eq.%s" % username, "limit": "1"},
-            timeout=QUERY_TIMEOUT,
-        )
-        response.raise_for_status()
-        return bool(response.json())
+        key = _account_key(username)
+        if not key:
+            return False
+        return key in self._removed_names()
+
+    def _removed_names(self):
+        global _REMOVED_UNTIL, _REMOVED_NAMES
+        now = time.monotonic()
+        if now < _REMOVED_UNTIL:
+            return _REMOVED_NAMES
+        with _REMOVED_LOCK:
+            now = time.monotonic()
+            if now < _REMOVED_UNTIL:
+                return _REMOVED_NAMES
+            names = self._load_removed()
+            _REMOVED_NAMES = names
+            _REMOVED_UNTIL = time.monotonic() + REMOVED_TTL
+            return names
+
+    def _load_removed(self):
+        found = set()
+        offset = 0
+        page = 1000
+        while True:
+            response = self._send(
+                "get",
+                self.base + "/sma_removed",
+                params={"select": "username", "limit": str(page), "offset": str(offset)},
+                timeout=QUERY_TIMEOUT,
+            )
+            response.raise_for_status()
+            rows = response.json()
+            for row in rows:
+                key = _account_key(row.get("username"))
+                if key:
+                    found.add(key)
+            if len(rows) < page:
+                return frozenset(found)
+            offset += page
 
     def ensure_user(self, username):
         if self.is_removed(username):
@@ -105,9 +166,11 @@ class Database(object):
             timeout=QUERY_TIMEOUT,
         )
         if response.status_code == 409:
+            _forget_user(username)
             return self.get_user(username), False
         response.raise_for_status()
         rows = response.json()
+        _forget_user(username)
         return rows[0], True
 
     def list_users(self):
@@ -300,6 +363,19 @@ class Database(object):
             timeout=QUERY_TIMEOUT,
         )
         response.raise_for_status()
+        _forget_user(username)
+
+
+def _account_key(value):
+    return str(value or "").strip().lower()
+
+
+def _forget_user(username):
+    key = _account_key(username)
+    if not key:
+        return
+    with _USER_LOCK:
+        _USER_CACHE.pop(key, None)
 
 
 def empty_counts():
