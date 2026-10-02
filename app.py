@@ -184,6 +184,12 @@ def premium_required(row=None):
     return jsonify({"error": error, "locked": True}), 402
 
 
+def pfp_path(username):
+    # A miss on the plain URL is cached at the edge for a day. The page uses this
+    # other URL once the file exists, so that miss does not hide the picture.
+    return "/api/pfp/%s?v=1" % username
+
+
 def lookup_payload(user, posts, added, username, total=None, counts=None, locked=0, premium=True, scrape=None):
     shown = [] if added else [present_post(row, post_is_locked(row, premium)) for row in posts]
     if added:
@@ -203,7 +209,7 @@ def lookup_payload(user, posts, added, username, total=None, counts=None, locked
         "bio": user.get("bio") or "",
         "bioMentions": clean_mentions(user.get("bio_mentions")),
         "visibility": user.get("visibility") or "",
-        "pfpUrl": "/api/pfp/%s" % username if user.get("pfp") else None,
+        "pfpUrl": pfp_path(username) if user.get("pfp") else None,
         "added": added,
         "posts": shown,
         "total": total,
@@ -428,7 +434,7 @@ def add():
             "name": user.get("name") or "",
             "bio": user.get("bio") or "",
             "visibility": user.get("visibility") or "",
-            "pfpUrl": "/api/pfp/%s" % (user.get("username") or username) if user.get("pfp") else None,
+            "pfpUrl": pfp_path(user.get("username") or username) if user.get("pfp") else None,
             "firstScrape": outcome.scrape,
         }
     )
@@ -567,7 +573,7 @@ def users():
                     "name": row.get("name") or "",
                     "bio": row.get("bio") or "",
                     "visibility": row.get("visibility") or "",
-                    "pfpUrl": "/api/pfp/%s" % row.get("username") if row.get("pfp") else None,
+                    "pfpUrl": pfp_path(row.get("username")) if row.get("pfp") else None,
                 }
                 for row in rows
             ]
@@ -593,7 +599,7 @@ def one_post(username, post_id):
     payload = present_post(row, post_is_locked(row, viewer_is_premium()))
     payload["username"] = user.get("username") or clean_username(username)
     payload["name"] = user.get("name") or ""
-    payload["pfpUrl"] = "/api/pfp/%s" % payload["username"] if user.get("pfp") else None
+    payload["pfpUrl"] = pfp_path(payload["username"]) if user.get("pfp") else None
     return jsonify(payload)
 
 
