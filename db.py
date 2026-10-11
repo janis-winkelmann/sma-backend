@@ -19,9 +19,9 @@ USER_TTL = 20
 _USER_LOCK = threading.Lock()
 _USER_CACHE = {}
 
-# A warm socket was going quiet, and the next profile sat on it until the
-# read timeout. Open a new connection for each query. The pool only caps how
-# many of those can be in flight in one worker.
+# One pool per worker keeps Supabase connections warm. A socket that goes
+# quiet used to sit for six seconds; it now fails fast and the retry opens
+# its own connection instead of borrowing another one from that pool.
 _POOL_LOCK = threading.Lock()
 _POOL = None
 _HTTP = threading.local()
@@ -71,9 +71,6 @@ class Database(object):
             return session
         session = requests.Session()
         session.headers.update(self._headers)
-        # Do not put a finished Supabase socket back in the pool. A later page
-        # was waiting on that socket for the whole read timeout.
-        session.headers["Connection"] = "close"
         session.mount("https://", _shared_pool())
         _HTTP.session = session
         return session
@@ -87,7 +84,6 @@ class Database(object):
             _HTTP.session = None
             headers = dict(self._headers)
             headers.update(kwargs.pop("headers", None) or {})
-            headers["Connection"] = "close"
             kwargs["headers"] = headers
             kwargs["timeout"] = RETRY_TIMEOUT
             return getattr(requests, method)(url, **kwargs)
