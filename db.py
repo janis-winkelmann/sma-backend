@@ -19,25 +19,28 @@ USER_TTL = 20
 _USER_LOCK = threading.Lock()
 _USER_CACHE = {}
 
-# Every gunicorn thread used to open its own TLS connection, and the count
-# queries opened yet another. Those handshakes are what timed out. One pool
-# per worker keeps connections warm and lets a lot of queries share them.
+# A warm socket was going quiet, and the next profile sat on it until the
+# read timeout. Open a new connection for each query. The pool only caps how
+# many of those can be in flight in one worker.
 _POOL_LOCK = threading.Lock()
 _POOL = None
 _HTTP = threading.local()
-QUERY_TIMEOUT = (3, 6)
+# A reused socket often sits until the read timeout and only then succeeds on
+# the retry. Fail that socket quickly. The retry opens a connection of its own.
+QUERY_TIMEOUT = (2, 2)
+RETRY_TIMEOUT = (2, 4)
 log = logging.getLogger("sma.db")
 
 
 
 class SharedAdapter(HTTPAdapter):
-    """Bound a dead keep-alive so a stalled Supabase socket cannot sit for a minute."""
+    """Stop a stalled Supabase socket from sitting for the whole read timeout."""
 
     def init_poolmanager(self, connections, maxsize, block=False, **kwargs):
         options = list(kwargs.get("socket_options") or [])
         user_timeout = getattr(socket, "TCP_USER_TIMEOUT", None)
         if user_timeout is not None:
-            options.append((socket.IPPROTO_TCP, user_timeout, 5000))
+            options.append((socket.IPPROTO_TCP, user_timeout, 2000))
         kwargs["socket_options"] = options
         return HTTPAdapter.init_poolmanager(self, connections, maxsize, block=block, **kwargs)
 
@@ -48,7 +51,7 @@ def _shared_pool():
         return _POOL
     with _POOL_LOCK:
         if _POOL is None:
-            _POOL = SharedAdapter(pool_connections=8, pool_maxsize=40, max_retries=0, pool_block=True)
+            _POOL = SharedAdapter(pool_connections=8, pool_maxsize=40, max_retries=0, pool_block=False)
         return _POOL
 
 
@@ -68,6 +71,9 @@ class Database(object):
             return session
         session = requests.Session()
         session.headers.update(self._headers)
+        # Do not put a finished Supabase socket back in the pool. A later page
+        # was waiting on that socket for the whole read timeout.
+        session.headers["Connection"] = "close"
         session.mount("https://", _shared_pool())
         _HTTP.session = session
         return session
@@ -77,10 +83,14 @@ class Database(object):
         try:
             return getattr(self._session(), method)(url, **kwargs)
         except (requests.Timeout, requests.ConnectionError):
-            # Leave the shared pool alone. This thread just borrows a different connection.
-            log.warning("supabase connection failed; retrying on the shared pool")
+            log.warning("supabase connection failed; retrying on a new connection")
             _HTTP.session = None
-            return getattr(self._session(), method)(url, **kwargs)
+            headers = dict(self._headers)
+            headers.update(kwargs.pop("headers", None) or {})
+            headers["Connection"] = "close"
+            kwargs["headers"] = headers
+            kwargs["timeout"] = RETRY_TIMEOUT
+            return getattr(requests, method)(url, **kwargs)
 
     def get_user(self, username):
         key = _account_key(username)
