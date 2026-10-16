@@ -10,6 +10,7 @@ import requests
 from flask import Flask, Response, jsonify, request
 import scraper_client
 from db import Database
+from image_cache import cached_image, store_cached_image
 from media import (
     DiscordFiles,
     audio_header_patch,
@@ -290,15 +291,26 @@ def image_response(data, content_type):
 
 
 def deliver_image(files, stored, save):
+    hit = cached_image(stored)
+    if hit:
+        return image_response(*hit)
     try:
         url = remember_link(files, stored, save)
     except requests.RequestException:
         app.logger.warning("image link refresh failed")
         url = stored
+    if url != stored:
+        hit = cached_image(url)
+        if hit:
+            store_cached_image(stored, hit[0], hit[1])
+            return image_response(*hit)
     try:
         data, content_type = read_image_bytes(url)
     except requests.RequestException:
         return None
+    store_cached_image(url, data, content_type)
+    if url != stored:
+        store_cached_image(stored, data, content_type)
     return image_response(data, content_type)
 
 
@@ -870,13 +882,23 @@ def _thumb_ids(raw):
 
 
 def _download_thumbs(store, files, rows):
-    stored = [(post_id, url) for post_id, url in rows.items() if url]
+    downloaded = {}
+    missing = []
+    for post_id, url in rows.items():
+        if not url:
+            continue
+        hit = cached_image(url)
+        if hit:
+            downloaded[post_id] = hit
+            continue
+        missing.append((post_id, url))
+    if not missing:
+        return downloaded
     try:
-        mapping, _updates = files.prepare([url for _post_id, url in stored])
+        mapping, _updates = files.prepare([url for _post_id, url in missing])
     except requests.RequestException:
         app.logger.warning("image link refresh failed")
         mapping = {}
-    downloaded = {}
 
     def load(item):
         post_id, url = item
@@ -886,10 +908,13 @@ def _download_thumbs(store, files, rows):
             data, content_type = read_image_bytes(fresh, attempts=2)
         except requests.RequestException:
             return post_id, refreshed, None
+        store_cached_image(fresh, data, content_type)
+        if fresh != url:
+            store_cached_image(url, data, content_type)
         return post_id, refreshed, (data, content_type)
 
     with ThreadPoolExecutor(max_workers=8) as pool:
-        results = list(pool.map(load, stored))
+        results = list(pool.map(load, missing))
     for post_id, refreshed, payload in results:
         if refreshed:
             try:

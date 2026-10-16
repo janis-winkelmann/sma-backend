@@ -606,6 +606,9 @@ class ApiTest(unittest.TestCase):
         appmod._THUMB_INFLIGHT.clear()
         appmod._THUMB_BYTES = 0
 
+        from image_cache import clear_image_cache
+        clear_image_cache()
+
         class Store(object):
             def __init__(self):
                 self.lookups = 0
