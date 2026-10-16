@@ -29,14 +29,14 @@ def _path_for(url):
     return os.path.join(cache_root(), key[:2], key)
 
 
-def cached_image(url):
+def cached_image(url, max_age=None):
     """Bytes saved for this attachment, ignoring the expiring signature on the URL."""
     path = _path_for(url)
     try:
         modified = os.path.getmtime(path)
     except OSError:
         return None
-    if time.time() - modified > CACHE_TTL:
+    if time.time() - modified > (CACHE_TTL if max_age is None else max_age):
         return None
     try:
         with open(path, "rb") as handle:

@@ -825,7 +825,7 @@ def _thumb_cached(post_id):
         return hit
 
 
-def _thumb_store(post_id, data, content_type):
+def _thumb_store(post_id, data, content_type, persist=True):
     global _THUMB_BYTES
     size = len(data)
     if size <= 0 or size > _THUMB_MAX_BYTES:
@@ -843,6 +843,20 @@ def _thumb_store(post_id, data, content_type):
             dropped = _THUMB_CACHE.pop(oldest, None)
             if dropped:
                 _THUMB_BYTES -= len(dropped[0])
+    if persist:
+        store_cached_image("thumb://%s" % post_id, data, content_type)
+
+
+def _thumb_saved(post_id):
+    """Memory first, then the copy shared by every API worker, before asking the database."""
+    hit = _thumb_cached(post_id)
+    if hit:
+        return hit
+    saved = cached_image("thumb://%s" % post_id)
+    if not saved:
+        return None
+    _thumb_store(post_id, saved[0], saved[1], persist=False)
+    return saved
 
 
 def _load_post_row(store, post_id):
@@ -938,7 +952,7 @@ def thumbs():
     found = {}
     needed = []
     for post_id in ids:
-        cached = _thumb_cached(post_id)
+        cached = _thumb_saved(post_id)
         if cached:
             found[post_id] = cached
         else:
@@ -971,7 +985,7 @@ def thumbs():
 
 @app.get("/api/thumb/<post_id>")
 def thumb(post_id):
-    cached = _thumb_cached(post_id)
+    cached = _thumb_saved(post_id)
     if cached:
         return image_response(*cached)
     with _THUMB_LOCK:
@@ -1011,11 +1025,17 @@ def thumb(post_id):
 
 @app.get("/api/pfp/<username>")
 def pfp(username):
+    clean = clean_username(username)
+    # The saved file is what the page needs. Looking the account up first made every
+    # repeat wait on the database even when the picture was already on disk.
+    hit = cached_image("pfp://%s" % clean, max_age=3600)
+    if hit:
+        return image_response(*hit)
     store = database()
     files = discord_files()
     if store is None or files is None:
         return jsonify({"error": "Storage is not configured."}), 503
-    user = store.get_user(clean_username(username))
+    user = store.get_user(clean)
     if not user or not user.get("pfp"):
         # A picture often arrives a few seconds into the first scrape. A cached miss
         # would keep the page blank for a day after the file is stored.
@@ -1034,4 +1054,5 @@ def pfp(username):
         failed.status_code = 502
         failed.headers["Cache-Control"] = "no-store"
         return failed
+    store_cached_image("pfp://%s" % clean, image.get_data(), image.mimetype)
     return image
