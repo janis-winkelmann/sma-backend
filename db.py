@@ -14,6 +14,10 @@ REMOVED_TTL = 60
 _REMOVED_LOCK = threading.Lock()
 _REMOVED_UNTIL = 0.0
 _REMOVED_NAMES = frozenset()
+# After a query goes quiet, further requests fail immediately for a few seconds.
+# Otherwise every worker thread sits in that same read and the accept queue fills.
+SUPABASE_COOLDOWN = 8
+_DOWN_UNTIL = 0.0
 # The same account is read again for its photo, its posts, and the page around it.
 USER_TTL = 20
 _USER_LOCK = threading.Lock()
@@ -76,17 +80,25 @@ class Database(object):
         return session
 
     def _send(self, method, url, **kwargs):
+        if time.monotonic() < _DOWN_UNTIL:
+            raise requests.Timeout("supabase is not answering")
         kwargs.setdefault("timeout", QUERY_TIMEOUT)
         try:
             return getattr(self._session(), method)(url, **kwargs)
         except (requests.Timeout, requests.ConnectionError):
             log.warning("supabase connection failed; retrying on a new connection")
+            _pause_supabase()
             _HTTP.session = None
             headers = dict(self._headers)
             headers.update(kwargs.pop("headers", None) or {})
             kwargs["headers"] = headers
             kwargs["timeout"] = RETRY_TIMEOUT
-            return getattr(requests, method)(url, **kwargs)
+            try:
+                response = getattr(requests, method)(url, **kwargs)
+            except (requests.Timeout, requests.ConnectionError):
+                raise
+            _clear_pause()
+            return response
 
     def get_user(self, username):
         key = _account_key(username)
@@ -132,10 +144,18 @@ class Database(object):
             now = time.monotonic()
             if now < _REMOVED_UNTIL:
                 return _REMOVED_NAMES
+            # The refresh talks to Supabase. Keep that wait off this lock so a
+            # quiet database cannot line every profile request up behind it.
+            _REMOVED_UNTIL = now + 15
+        try:
             names = self._load_removed()
+        except requests.RequestException:
+            log.warning("removed list refresh failed")
+            return _REMOVED_NAMES
+        with _REMOVED_LOCK:
             _REMOVED_NAMES = names
             _REMOVED_UNTIL = time.monotonic() + REMOVED_TTL
-            return names
+        return names
 
     def _load_removed(self):
         found = set()
@@ -370,6 +390,16 @@ class Database(object):
         )
         response.raise_for_status()
         _forget_user(username)
+
+
+def _pause_supabase():
+    global _DOWN_UNTIL
+    _DOWN_UNTIL = time.monotonic() + SUPABASE_COOLDOWN
+
+
+def _clear_pause():
+    global _DOWN_UNTIL
+    _DOWN_UNTIL = 0.0
 
 
 def _account_key(value):
