@@ -226,6 +226,14 @@ def media_url(post_id, kind, chunks, locked):
     # Chunk count changes as a live grows, so a refresh does not reuse a shorter cached file.
     if kind == "live":
         return "/api/media/%s?n=%s" % (post_id, len(chunks))
+    # A replaced story keeps one chunk, so the size is what tells the browser the file changed.
+    if kind == "story":
+        first = chunks[0] if isinstance(chunks[0], dict) else {}
+        try:
+            size = int(first.get("size") or 0)
+        except (TypeError, ValueError):
+            size = 0
+        return "/api/media/%s?v=%s" % (post_id, size)
     return "/api/media/%s" % post_id
 
 

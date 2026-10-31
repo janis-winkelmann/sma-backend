@@ -239,6 +239,19 @@ class ApiTest(unittest.TestCase):
         self.assertEqual(payload["postedAt"], "2026-03-02T12:00:00Z")
         self.assertFalse(payload["locked"])
 
+    def test_a_replaced_story_gets_a_new_media_url(self):
+        payload = present_post(
+            {
+                "post_id": "7702502806460108054",
+                "type": "story",
+                "caption": "",
+                "is_deleted": False,
+                "posted_at": "2026-10-30T16:44:54Z",
+                "chunks": [{"url": "https://cdn.discordapp.com/attachments/1/2/story.part0000", "size": 2570277}],
+            }
+        )
+        self.assertEqual(payload["mediaUrl"], "/api/media/7702502806460108054?v=2570277")
+
     def test_locked_post_keeps_its_thumbnail(self):
         payload = present_post(
             {
